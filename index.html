@@ -6,171 +6,215 @@
 <title>Прыг-скок: мини-платформер (фан-версия, не связана с правообладателем)</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    background: linear-gradient(#2b3a67, #1a2340);
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-    font-family: Consolas, 'Courier New', monospace; color: #fff;
-    user-select: none; overflow: hidden;
-  }
-  h1 { font-size: 20px; letter-spacing: 3px; text-shadow: 2px 2px 0 #000; }
-  #hud { display: flex; gap: 24px; font-size: 14px; font-weight: bold; text-shadow: 2px 2px 0 #000; }
-  #hud b { color: #ffd23f; }
-  #wrap { position: relative; }
-  canvas { display: block; border: 3px solid #0d1226; image-rendering: pixelated; }
-  #info { font-size: 12px; color: #c8d0f0; text-align: center; line-height: 1.6; }
-  .note { color: #8890b0; font-size: 11px; }
-  #overlay {
-    position: absolute; inset: 0; background: rgba(10, 14, 30, 0.72);
-    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-    text-align: center; font-size: 22px; text-shadow: 2px 2px 0 #000;
-  }
-  #overlay.show { display: flex; }
-  #overlay small { font-size: 14px; color: #cfd6f5; }
-  #overlay button {
-    padding: 10px 22px; background: #e8612c; color: #fff; border: 3px solid #fff;
-    font: bold 14px Consolas, 'Courier New', monospace; cursor: pointer;
-  }
-  #overlay button:hover { background: #ff7a45; }
+  html, body { height: 100%; overflow: hidden; background: #141a33; }
+  #app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; user-select: none; }
+  #game { display: block; touch-action: none; box-shadow: 0 0 40px rgba(0,0,0,.5); }
+  .stars3 { color: #ffd23f; letter-spacing: 3px; font-size: 18px; }
+  .stars3 i { font-style: normal; color: rgba(255,255,255,.2); }
 </style>
 </head>
 <body>
-  <h1>ПРЫГ-СКОК</h1>
-  <div id="hud">
-    <span>ОЧКИ <b id="score">000000</b></span>
-    <span>МОНЕТЫ <b id="coins">00</b></span>
-    <span>УРОВЕНЬ <b id="level">1</b></span>
-    <span>ЖИЗНИ <b id="lives">3</b></span>
-    <span>РЕКОРД <b id="best">0</b></span>
-  </div>
-  <div id="wrap">
-    <canvas id="game" width="640" height="384"></canvas>
-    <div id="overlay"><div id="msg"></div><small id="sub"></small><button id="againBtn" type="button">ИГРАТЬ</button></div>
-  </div>
-  <div id="info">
-    ← → / A D - ходить · Shift - бежать · ↑ / Пробел / W - прыжок (держи - выше) · P / Esc - пауза · R - заново · M - звук<br>
-    <span class="note">Фан-версия, не связана с правообладателем. Герой, жуки и блоки нарисованы в коде, звуки синтезированы.</span>
-  </div>
-
+<div id="app"><canvas id="game" aria-label="Игровое поле"></canvas></div>
+<script src="kit.js"></script>
 <script>
 'use strict';
-// ---------- Поле ----------
-const TILE = 32, ROWS = 12, W = 640, H = ROWS * TILE;
-const STEP_MS = 1000 / 60;
-const GRAV = 0.55, MAXFALL = 11, JUMP_V = -11.2, JUMP_CUT = -4;
-const WALK = 3, RUN = 4.2, ACC = 0.45, FRICTION = 0.8;
-const COYOTE = 6, JUMP_BUFFER = 6;
-const START_LIVES = 3, BEST_KEY = 'jumper_best';
+// ================= Поле: 684x384 (16:9), клетка 32 =================
+const TILE = 32, ROWS = 12, W = 684, H = ROWS * TILE, STEP_MS = 1000 / 60;
+const GRAV = 0.55, MAXFALL = 11, JUMP_V = -11.2, JUMP_CUT = -4, SPRING_V = -15.5;
+const WALK = 3, RUN = 4.2, ACC = 0.45, FRICTION = 0.8, COYOTE = 6, JUMP_BUFFER = 6;
 const T = { EMPTY: 0, GROUND: 1, BRICK: 2, GIFT: 3, USED: 4, STONE: 5, PILLAR: 6, PILLAR_TOP: 7 };
-
 const params = new URLSearchParams(location.search);
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+let rnd = params.has('seed') ? mulberry32(Number(params.get('seed')) || 1) : Math.random;
 
-// ---------- Уровни: собираются кодом, а не строками - так видно, где яма и где лестница ----------
-function makeLevel(width, fill) {
-  const L = { w: width, t: new Uint8Array(width * ROWS), coins: [], enemies: [], flagX: 0, flagHit: 0, flagTop: 2 * TILE };
+// ================= Уровни собираются кодом =================
+function makeLevel(width, theme, fill) {
+  const L = { w: width, theme, t: new Uint8Array(width * ROWS), coins: [], enemies: [], movers: [], springs: [], spikes: [], checkpoints: [], flagX: 0, flagHit: 0, flagTop: 2 * TILE, boss: null, arena: null, start: { x: 64 } };
   const set = (x, y, v) => { if (x >= 0 && x < width && y >= 0 && y < ROWS) L.t[y * width + x] = v; };
   const api = {
     ground(a, b) { for (let x = a; x <= b; x++) { set(x, 10, T.GROUND); set(x, 11, T.GROUND); } },
-    pit(a, b) { for (let x = a; x <= b; x++) { set(x, 10, T.EMPTY); set(x, 11, T.EMPTY); } },
+    hill(a, b, h) { for (let x = a; x <= b; x++) for (let y = 10 - h; y <= 11; y++) set(x, y, T.GROUND); },
+    pit(a, b) { for (let x = a; x <= b; x++) for (let y = 0; y < ROWS; y++) if (L.t[y * width + x] === T.GROUND) set(x, y, T.EMPTY); },
+    ceiling(a, b, h = 2) { for (let x = a; x <= b; x++) for (let y = 0; y < h; y++) set(x, y, T.STONE); },
     blocks(x, y, s) { [...s].forEach((ch, i) => { const v = { B: T.BRICK, '?': T.GIFT, S: T.STONE }[ch]; if (v) set(x + i, y, v); }); },
-    coins(x, y, n) { for (let i = 0; i < n; i++) L.coins.push({ x: (x + i) * TILE + 8, y: y * TILE + 6, w: 16, h: 20, taken: false }); },
-    pillar(x, h) { for (let k = 0; k < h; k++) for (const dx of [0, 1]) set(x + dx, 9 - k, k === h - 1 ? T.PILLAR_TOP : T.PILLAR); },
+    coins(x, y, n, dx = 1) { for (let i = 0; i < n; i++) L.coins.push({ x: (x + i * dx) * TILE + 8, y: y * TILE + 6, w: 16, h: 20, taken: false }); },
+    pillar(x, h, base = 9) { for (let k = 0; k < h; k++) for (const dx of [0, 1]) set(x + dx, base - k, k === h - 1 ? T.PILLAR_TOP : T.PILLAR); },
     stairsUp(x, h) { for (let i = 0; i < h; i++) for (let k = 0; k <= i; k++) set(x + i, 9 - k, T.STONE); },
     stairsDown(x, h) { for (let i = 0; i < h; i++) for (let k = 0; k < h - i; k++) set(x + i, 9 - k, T.STONE); },
-    enemy(x) { L.enemies.push({ x: x * TILE + 2, y: 10 * TILE - 24, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: false }); },
-    flag(x) { L.flagX = x * TILE + 14; L.flagHit = x * TILE - 1; set(x, 9, T.STONE); },   // касание основания флага - финиш
+    beetle(x, row = 10) { L.enemies.push({ kind: 'beetle', x: x * TILE + 2, y: row * TILE - 24, w: 28, h: 24, vx: -1, vy: 0 }); },
+    bee(x, row, range = 3) { L.enemies.push({ kind: 'bee', x: x * TILE, y: row * TILE, base: row * TILE, home: x * TILE, range: range * TILE, w: 26, h: 20, vx: -0.8, vy: 0, fly: true }); },
+    mover(x, row, len, axis, range, speed = 0.9) { L.movers.push({ x: x * TILE, y: row * TILE, w: len * TILE, h: 12, axis, range: range * TILE, speed, bx: x * TILE, by: row * TILE, t: 0, dx: 0, dy: 0 }); },
+    spring(x, row = 10) { L.springs.push({ x: x * TILE + 4, y: row * TILE - 16, w: 24, h: 16, squash: 0 }); },
+    spikes(a, b, row = 10) { L.spikes.push({ x: a * TILE, y: row * TILE - 12, w: (b - a + 1) * TILE, h: 12 }); },
+    checkpoint(x) { L.checkpoints.push({ x: x * TILE + 12, reached: false }); },
+    flag(x) { L.flagX = x * TILE + 14; L.flagHit = x * TILE - 1; set(x, 9, T.STONE); },
+    boss(kind, a, b) { L.boss = kind; L.arena = { a: a * TILE, b: b * TILE }; },
   };
   fill(api);
   return L;
 }
 
 const LEVELS = [
-  () => makeLevel(130, (L) => {
-    L.ground(0, 129);
-    L.pit(30, 32); L.pit(66, 69); L.pit(97, 99);
-    L.blocks(14, 6, '?'); L.blocks(19, 6, 'B?B?B'); L.blocks(72, 6, 'B?B'); L.blocks(86, 6, '??');
-    L.coins(11, 8, 3); L.coins(30, 7, 3); L.coins(66, 7, 4); L.coins(97, 7, 3);
-    L.pillar(37, 2); L.pillar(45, 3); L.pillar(54, 2);
-    [24, 41, 49, 58, 76, 79, 90].forEach(L.enemy);
-    L.stairsUp(106, 4); L.stairsDown(112, 3);
-    L.flag(122);
-  }),
-  () => makeLevel(140, (L) => {
-    L.ground(0, 139);
-    L.pit(20, 22); L.pit(40, 43); L.pit(71, 73); L.pit(101, 104);
-    L.blocks(41, 7, 'BB'); L.blocks(47, 6, 'B?B'); L.blocks(12, 6, 'B?B');
-    L.blocks(60, 6, '?B?'); L.blocks(88, 6, 'BB??BB');
-    L.coins(20, 7, 3); L.coins(41, 6, 2); L.coins(71, 7, 3); L.coins(101, 7, 4); L.coins(116, 8, 4);
-    L.pillar(28, 2); L.pillar(33, 3); L.pillar(80, 3);
-    L.stairsUp(64, 3); L.stairsDown(67, 3);
-    [16, 26, 36, 52, 55, 62, 78, 85, 93, 96, 110, 118].forEach(L.enemy);
-    L.stairsUp(122, 5);
-    L.flag(133);
-  }),
+  { world: 1, name: 'Цветочный луг', par: 60, build: () => makeLevel(140, 'meadow', (L) => {
+    L.ground(0, 139); L.pit(28, 30); L.pit(58, 60); L.pit(96, 98);
+    L.blocks(12, 6, '?'); L.blocks(18, 6, 'B?B?B'); L.blocks(44, 6, '??'); L.blocks(76, 6, 'B?B'); L.blocks(110, 6, '?B?');
+    L.coins(8, 8, 3); L.coins(28, 7, 3); L.coins(58, 7, 3); L.coins(96, 7, 3); L.coins(82, 8, 4); L.coins(118, 8, 3);
+    L.pillar(36, 2); L.pillar(66, 2); L.pillar(88, 3);
+    [22, 41, 50, 71, 80, 104, 114].forEach((x) => L.beetle(x));
+    L.checkpoint(70); L.stairsUp(124, 3); L.flag(132);
+  }) },
+  { world: 1, name: 'Холмы и пружины', par: 70, build: () => makeLevel(150, 'meadow', (L) => {
+    L.ground(0, 149);
+    L.hill(20, 30, 1); L.hill(31, 40, 2); L.pit(41, 43); L.hill(44, 52, 1); L.pit(60, 62);
+    L.spring(66); L.blocks(68, 4, 'SSSS'); L.coins(68, 3, 4);
+    L.hill(80, 95, 2); L.pit(96, 99); L.hill(100, 112, 1); L.pit(120, 122);
+    L.coins(24, 7, 3); L.coins(34, 6, 3); L.coins(46, 7, 3); L.coins(84, 6, 5); L.coins(104, 7, 3); L.coins(126, 8, 3);
+    L.blocks(46, 5, '?B?'); L.blocks(86, 4, '??');
+    [26, 36, 48, 88, 92, 106, 128].forEach((x) => L.beetle(x, x >= 31 && x <= 40 ? 8 : (x >= 20 && x <= 30) || (x >= 44 && x <= 52) || (x >= 100 && x <= 112) ? 9 : x >= 80 && x <= 95 ? 8 : 10));
+    L.bee(56, 6, 3); L.bee(116, 5, 3);
+    L.checkpoint(75); L.stairsUp(134, 3); L.flag(142);
+  }) },
+  { world: 1, name: 'Висячие мосты', par: 80, build: () => makeLevel(150, 'sunset', (L) => {
+    L.ground(0, 149);
+    L.pit(20, 27); L.mover(21, 8, 3, 'x', 2);
+    L.pit(45, 53); L.mover(46, 8, 3, 'x', 3);
+    L.pit(80, 88); L.mover(81, 7, 3, 'x', 3, 1.1);
+    L.pit(110, 117); L.mover(111, 8, 3, 'x', 2, 1.2);
+    L.coins(22, 6, 4); L.coins(47, 6, 5); L.coins(82, 5, 5); L.coins(112, 6, 4); L.coins(64, 8, 5); L.coins(130, 8, 3);
+    L.blocks(34, 6, 'B??B'); L.blocks(96, 6, '?B?');
+    [32, 38, 60, 68, 72, 94, 102, 124, 130].forEach((x) => L.beetle(x));
+    L.bee(40, 6, 2); L.bee(98, 5, 3);
+    L.checkpoint(70); L.stairsUp(134, 3); L.flag(142);
+  }) },
+  { world: 1, name: 'Логово Короля жуков', par: 60, boss: true, build: () => makeLevel(64, 'sunset', (L) => {
+    L.ground(0, 63); L.coins(6, 8, 5); L.blocks(10, 6, '?');
+    L.pillar(22, 2);
+    L.boss('beetleKing', 26, 62);
+  }) },
+  { world: 2, name: 'Хрустальная пещера', par: 80, build: () => makeLevel(150, 'cave', (L) => {
+    L.ground(0, 149); L.ceiling(0, 149, 2);
+    L.spikes(24, 26); L.pit(40, 42); L.spikes(56, 58); L.pit(74, 77); L.spikes(92, 95); L.pit(110, 112); L.spikes(124, 125);
+    L.blocks(30, 6, 'B?B'); L.blocks(62, 6, '???'); L.blocks(100, 6, 'B?B');
+    L.coins(24, 7, 3); L.coins(40, 7, 3); L.coins(56, 7, 3); L.coins(74, 7, 4); L.coins(92, 7, 4); L.coins(110, 7, 3);
+    [20, 34, 48, 66, 84, 104, 118, 130].forEach((x) => L.beetle(x));
+    L.bee(46, 6, 3); L.bee(88, 6, 2);
+    L.pillar(52, 2); L.pillar(116, 3);
+    L.checkpoint(80); L.stairsUp(134, 3); L.flag(142);
+  }) },
+  { world: 2, name: 'Подземная река', par: 85, build: () => makeLevel(150, 'cave', (L) => {
+    L.ground(0, 149); L.ceiling(0, 149, 2);
+    L.pit(22, 27); L.mover(24, 8, 2, 'y', 2);
+    L.pit(44, 50); L.mover(46, 9, 3, 'y', 3, 0.8);
+    L.pit(70, 76); L.mover(72, 8, 3, 'x', 2);
+    L.pit(96, 102); L.mover(98, 9, 3, 'y', 3, 1);
+    L.pit(120, 124); L.spikes(130, 131);
+    L.coins(24, 5, 2); L.coins(46, 5, 3); L.coins(72, 6, 3); L.coins(98, 5, 3); L.coins(58, 8, 5); L.coins(112, 8, 4);
+    L.blocks(34, 6, '?B?'); L.blocks(86, 6, 'B?');
+    [16, 32, 38, 56, 62, 84, 90, 108, 114, 136].forEach((x) => L.beetle(x));
+    L.bee(60, 6, 3); L.bee(88, 5, 3); L.bee(116, 6, 2);
+    L.checkpoint(80); L.stairsUp(136, 3); L.flag(144);
+  }) },
+  { world: 2, name: 'Огненная крепость', par: 95, build: () => makeLevel(160, 'fortress', (L) => {
+    L.ground(0, 159); L.ceiling(0, 159, 1);
+    L.spikes(18, 20); L.pit(32, 35);
+    L.spring(44); L.pillar(47, 5);                          // стена в 5 клеток - только пружиной
+    L.pit(58, 64); L.mover(59, 8, 3, 'x', 3, 1);
+    L.spikes(72, 74); L.pit(84, 87);
+    L.spring(96); L.blocks(99, 4, 'SSSSS'); L.coins(99, 3, 5); L.pillar(98, 5);
+    L.pit(112, 119); L.mover(113, 8, 2, 'x', 2, 1.1); L.mover(116, 7, 2, 'y', 2, 1);
+    L.spikes(128, 130); L.spikes(136, 137);
+    L.coins(18, 7, 3); L.coins(32, 7, 4); L.coins(60, 6, 4); L.coins(72, 7, 3); L.coins(84, 7, 4); L.coins(128, 7, 3);
+    L.blocks(26, 6, '?B?'); L.blocks(76, 6, '??');
+    [14, 28, 40, 54, 68, 80, 92, 106, 124, 134, 142].forEach((x) => L.beetle(x));
+    L.bee(38, 6, 2); L.bee(90, 6, 3); L.bee(132, 6, 3);
+    L.checkpoint(90); L.stairsUp(144, 3); L.flag(152);
+  }) },
+  { world: 2, name: 'Трон каменного голема', par: 70, boss: true, build: () => makeLevel(66, 'fortress', (L) => {
+    L.ground(0, 65); L.ceiling(0, 65, 1); L.coins(6, 8, 5); L.blocks(12, 6, '?');
+    L.pillar(22, 2);
+    L.boss('golem', 26, 64);
+  }) },
 ];
+const WORLD_NAMES = { 1: 'Мир 1: Солнечная долина', 2: 'Мир 2: Подземелья' };
 
-// ---------- Хранилище ----------
-function loadBest() { try { return parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) { return 0; } }
-function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) { /* нет хранилища */ } }
-
-// ---------- Звук (WebAudio, без файлов) ----------
-let audio = null, muted = false;
-function beep(freq, dur, type = 'square', vol = 0.08, slide) {
-  if (muted) return;
-  try {
-    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
-    const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
-    o.type = type; o.frequency.setValueAtTime(freq, t);
-    if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur);
-  } catch (e) { /* звук недоступен */ }
-}
-function seq(notes) { notes.forEach(([f, d], i) => setTimeout(() => beep(f, d), i * 110)); }
-const SFX = {
-  jump: () => beep(420, 0.14, 'square', 0.06, 820),
-  coin: () => { beep(900, 0.05); setTimeout(() => beep(1350, 0.14), 50); },
-  bump: () => beep(160, 0.08, 'square', 0.1, 90),
-  stomp: () => beep(260, 0.1, 'triangle', 0.12, 80),
-  die: () => seq([[400, 0.12], [330, 0.12], [220, 0.3]]),
-  clear: () => seq([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.25]]),
-};
-
-// ---------- Состояние ----------
-const state = { phase: 'ready', levelIdx: 0, score: 0, coins: 0, lives: START_LIVES, best: loadBest(), timer: 0, frame: 0 };
-const player = { x: 0, y: 0, w: 22, h: 30, vx: 0, vy: 0, onGround: false, facing: 1, coyote: 0, buffer: 0, walk: 0 };
-let level = null;
-let camX = 0;
-const pops = [];
-const keys = {};
-let jumpWasDown = false;
+// ================= Состояние =================
+const state = { phase: 'play', mode: 'demo', levelIdx: 0, lives: 3, coins: 0, score: 0, timer: 0, frame: 0, dyingT: 0, clearT: 0, respawn: null, banner: null, shake: 0, hurtInLevel: false, bossHitTaken: false };
+const player = { x: 0, y: 0, w: 22, h: 30, vx: 0, vy: 0, onGround: false, facing: 1, coyote: 0, buffer: 0, walk: 0, standOn: null, invuln: 0 };
+let level = null, camX = 0, boss = null, lockCam = null;
+const pops = [], particles = [], rocks = [];
+let jumpWasDown = false, autopilot = false;
+let kit;
+let progress = { unlocked: 0, levels: {}, done: false };
+let totals = { coins: 0, stomps: 0 };
 
 function tileAt(tx, ty) {
-  if (tx < 0) return T.STONE;            // левый край уровня - стена
+  if (tx < 0) return T.STONE;
   if (tx >= level.w || ty < 0 || ty >= ROWS) return T.EMPTY;
   return level.t[ty * level.w + tx];
 }
 function setTile(tx, ty, v) { level.t[ty * level.w + tx] = v; }
 const solid = (tx, ty) => tileAt(tx, ty) !== T.EMPTY;
 
+// ================= Звуки =================
+function seq(notes) { notes.forEach(([f, d], i) => kit.tone(f, d, { vol: 0.08, delay: i * 0.1 })); }
+const SFX = {
+  jump: () => kit.tone(420, 0.14, { vol: 0.06, slide: 820 }),
+  spring: () => kit.tone(300, 0.25, { type: 'triangle', vol: 0.09, slide: 1200 }),
+  coin: () => { kit.tone(900, 0.05, { vol: 0.06 }); kit.tone(1350, 0.14, { vol: 0.06, delay: 0.05 }); },
+  bump: () => kit.tone(160, 0.08, { vol: 0.1, slide: 90 }),
+  stomp: () => kit.tone(260, 0.1, { type: 'triangle', vol: 0.12, slide: 80 }),
+  hurt: () => seq([[400, 0.12], [330, 0.12], [220, 0.3]]),
+  flag: () => seq([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.25]]),
+  boss: () => { kit.noise(0.5, { vol: 0.25, freq: 500 }); kit.tone(120, 0.5, { type: 'sawtooth', vol: 0.1, slide: 50 }); },
+};
+function burst(x, y, color, n, sp = 3) {
+  if (!kit.settings.effects || particles.length > 300) return;
+  for (let i = 0; i < n; i++) particles.push({ x, y, vx: (rnd() - 0.5) * sp * 2, vy: -rnd() * sp * 1.6, life: 30 + rnd() * 20, color });
+}
+
+// ================= Запуск уровня =================
+function livesFor() { return kit.diff({ easy: 5, normal: 3, hard: 2 }); }
+function bossHpFor() { return kit.diff({ easy: 2, normal: 3, hard: 4 }); }
+function enemySpeed() { return kit.diff({ easy: 0.8, normal: 1, hard: 1.25 }); }
+
 function loadLevel(i) {
   state.levelIdx = i;
-  level = LEVELS[i]();
-  pops.length = 0;
-  player.x = 64; player.y = 10 * TILE - player.h;
-  player.vx = 0; player.vy = 0; player.onGround = true; player.facing = 1; player.coyote = 0; player.buffer = 0;
-  camX = 0;
+  level = LEVELS[i].build();
+  for (const e of level.enemies) { e.vx *= enemySpeed(); e.alive = true; e.squash = 0; e.active = false; }
+  pops.length = 0; particles.length = 0; rocks.length = 0;
+  boss = null; lockCam = null;
+  state.respawn = { x: level.start.x };
+  placePlayer(state.respawn.x);
 }
-
-function newGame() {
-  state.score = 0; state.coins = 0; state.lives = START_LIVES; state.frame = 0;
+function placePlayer(x) {
+  let top = 10;
+  while (top > 0 && solid(Math.floor((x + 11) / TILE), top - 1)) top--;
+  Object.assign(player, { x, y: top * TILE - player.h, vx: 0, vy: 0, onGround: true, facing: 1, coyote: 0, buffer: 0, standOn: null, invuln: 60 });
+  camX = Math.max(0, Math.min(x - W / 3, level.w * TILE - W));
+}
+function startLevel(i) {
+  autopilot = false;
+  state.mode = 'level';
+  loadLevel(i);
+  state.phase = 'play'; state.lives = livesFor(); state.coins = 0; state.score = 0; state.timer = 0; state.hurtInLevel = false; state.bossHitTaken = false;
+  state.banner = { text: `${LEVELS[i].world}-${(i % 4) + 1} ${LEVELS[i].name}`, t: 140 };
+  kit.play();
+}
+function startDemo() {
+  state.mode = 'demo';
   loadLevel(0);
-  state.phase = 'play';
-  hideOverlay();
+  state.phase = 'play'; state.lives = 99; state.timer = 0;
+  autopilot = true;
 }
 
-// ---------- Движение с учётом клеток ----------
-// Сдвиг по одной оси и выталкивание из твёрдых клеток. Возвращает клетку, в которую упёрлись.
+// ================= Столкновения с клетками =================
 function moveAxis(o, axis) {
   if (axis === 'x') {
     o.x += o.vx;
@@ -189,384 +233,621 @@ function moveAxis(o, axis) {
       const ty = Math.floor((o.y + o.h - 0.001) / TILE);
       for (let tx = left; tx <= right; tx++) if (solid(tx, ty)) { o.y = ty * TILE - o.h; o.vy = 0; o.onGround = true; return { tx, ty }; }
     } else if (o.vy < 0) {
-      const ty = Math.floor(o.y / TILE);
-      // Удар головой: берём клетку ближе к центру героя.
-      const cx = Math.floor((o.x + o.w / 2) / TILE);
-      const order = [cx, left, right];
-      for (const tx of order) if (solid(tx, ty)) { o.y = (ty + 1) * TILE; o.vy = 0; return { tx, ty }; }
+      const ty = Math.floor(o.y / TILE), cx = Math.floor((o.x + o.w / 2) / TILE);
+      for (const tx of [cx, left, right]) if (solid(tx, ty)) { o.y = (ty + 1) * TILE; o.vy = 0; return { tx, ty }; }
     }
   }
   return null;
 }
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
 function bumpBlock(tx, ty) {
-  const t = tileAt(tx, ty);
-  if (t === T.GIFT) {
+  if (tileAt(tx, ty) === T.GIFT) {
     setTile(tx, ty, T.USED);
-    state.coins++; state.score += 200;
+    state.coins++; state.score += 200; totals.coins++;
     pops.push({ x: tx * TILE + TILE / 2, y: ty * TILE - 8, vy: -6, life: 30 });
     SFX.coin();
-  } else {
-    SFX.bump();
-  }
-  // Жук, стоящий на ударенном блоке, погибает.
-  for (const e of level.enemies) {
-    if (e.alive && Math.abs(e.x + e.w / 2 - (tx * TILE + TILE / 2)) < TILE && Math.abs(e.y + e.h - ty * TILE) < 4) killEnemy(e, 100);
-  }
+  } else SFX.bump();
+  for (const e of level.enemies) if (e.alive && !e.fly && Math.abs(e.x + e.w / 2 - (tx * TILE + TILE / 2)) < TILE && Math.abs(e.y + e.h - ty * TILE) < 4) killEnemy(e);
 }
-
-function killEnemy(e, pts) {
+function killEnemy(e) {
   e.alive = false; e.squash = 30;
-  state.score += pts;
+  state.score += 100; totals.stomps++;
+  burst(e.x + e.w / 2, e.y + e.h / 2, e.kind === 'bee' ? '#ffd23f' : '#9b6ad0', 10);
   SFX.stomp();
+  if (totals.stomps >= 50) kit.unlock('stomp50');
 }
 
-function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
-
-function loseLife() {
-  if (state.phase !== 'play') return;
+// ================= Урон и смерть =================
+function hurt() {
+  if (state.phase !== 'play' || player.invuln > 0 || state.mode === 'demo') return;
   state.phase = 'dying';
-  state.timer = 70;
+  state.dyingT = 70;
+  state.hurtInLevel = true;
+  if (boss) state.bossHitTaken = true;
   player.vy = -9; player.vx = 0;
-  SFX.die();
+  if (kit.settings.shake) state.shake = 8;
+  SFX.hurt();
+}
+function afterDeath() {
+  state.lives--;
+  if (state.lives <= 0) { levelFailed(); return; }
+  // Уровень не перестраивается: собранные монеты и раздавленные жуки не возвращаются
+  // (иначе монеты можно было бы собрать дважды). Босс, если был, ждёт нового входа в логово.
+  boss = null; lockCam = null; rocks.length = 0;
+  placePlayer(state.respawn.x);
+  state.phase = 'play';
+  kit.refreshMusic();
 }
 
+// ================= Шаг мира =================
 function update() {
   state.frame++;
+  if (state.shake > 0) state.shake *= 0.85;
+  for (let i = particles.length - 1; i >= 0; i--) { const q = particles[i]; q.x += q.vx; q.y += q.vy; q.vy += 0.25; if (--q.life <= 0) particles.splice(i, 1); }
   if (state.phase === 'dying') {
-    player.vy = Math.min(player.vy + GRAV, MAXFALL);
-    player.y += player.vy;
-    if (--state.timer <= 0) {
-      state.lives--;
-      if (state.lives <= 0) finish('over');
-      else { loadLevel(state.levelIdx); state.phase = 'play'; }
-    }
+    player.vy = Math.min(player.vy + GRAV, MAXFALL); player.y += player.vy;
+    if (--state.dyingT <= 0) afterDeath();
     return;
   }
-  if (state.phase === 'clear') {
-    if (--state.timer <= 0) {
-      if (state.levelIdx + 1 < LEVELS.length) { loadLevel(state.levelIdx + 1); state.phase = 'play'; }
-      else finish('won');
-    }
-    return;
-  }
+  if (state.phase === 'clear') { if (--state.clearT <= 0) levelComplete(); return; }
   if (state.phase !== 'play') return;
+  state.timer++;
+  if (player.invuln > 0) player.invuln--;
 
-  // Управление
-  const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
-  const jumpDown = !!(keys.ArrowUp || keys.Space || keys.KeyW);
-  const max = (keys.ShiftLeft || keys.ShiftRight) ? RUN : WALK;
+  // движущиеся платформы: сначала едут сами, потом везут стоящего
+  for (const m of level.movers) {
+    m.t++;
+    const ox = m.x, oy = m.y;
+    const off = Math.sin(m.t * 0.02 * m.speed) * m.range / 2 + m.range / 2;
+    if (m.axis === 'x') m.x = m.bx + off; else m.y = m.by - off;
+    m.dx = m.x - ox; m.dy = m.y - oy;
+  }
+  if (player.standOn) { player.x += player.standOn.dx; player.y += player.standOn.dy; }
+
+  // управление
+  let left, right, jumpDown, run;
+  if (autopilot) ({ left, right, jumpDown, run } = pilot());
+  else { left = kit.isDown('left'); right = kit.isDown('right'); jumpDown = kit.isDown('jump'); run = kit.isDown('run'); }
+  const max = run ? RUN : WALK;
   if (left && !right) { player.vx = Math.max(player.vx - ACC, -max); player.facing = -1; }
   else if (right && !left) { player.vx = Math.min(player.vx + ACC, max); player.facing = 1; }
   else { player.vx *= FRICTION; if (Math.abs(player.vx) < 0.1) player.vx = 0; }
-
-  if (jumpDown && !jumpWasDown) player.buffer = JUMP_BUFFER;   // нажатие чуть раньше приземления не теряется
+  if (jumpDown && !jumpWasDown) player.buffer = JUMP_BUFFER;
   jumpWasDown = jumpDown;
   if (player.onGround) player.coyote = COYOTE; else if (player.coyote > 0) player.coyote--;
-  if (player.buffer > 0) {
-    player.buffer--;
-    if (player.coyote > 0) { player.vy = JUMP_V; player.coyote = 0; player.buffer = 0; player.onGround = false; SFX.jump(); }
-  }
-  if (!jumpDown && player.vy < JUMP_CUT) player.vy = JUMP_CUT;   // отпустил - прыжок ниже
+  if (player.buffer > 0) { player.buffer--; if (player.coyote > 0) { player.vy = JUMP_V; player.coyote = 0; player.buffer = 0; player.onGround = false; player.standOn = null; if (state.mode !== 'demo') SFX.jump(); } }
+  if (!jumpDown && player.vy < JUMP_CUT) player.vy = JUMP_CUT;
 
   player.vy = Math.min(player.vy + GRAV, MAXFALL);
   player.onGround = false;
   moveAxis(player, 'x');
+  if (lockCam) player.x = Math.max(lockCam.a + 2, Math.min(player.x, lockCam.b - player.w - 2));
   const prevBottom = player.y + player.h;
   const hitY = moveAxis(player, 'y');
   if (hitY && player.vy === 0 && !player.onGround) bumpBlock(hitY.tx, hitY.ty);
+  // приземление на платформу (только сверху)
+  player.standOn = null;
+  if (player.vy >= 0) for (const m of level.movers) {
+    if (player.x + player.w > m.x + 2 && player.x < m.x + m.w - 2 && prevBottom <= m.y + Math.max(2, m.dy + 2) && player.y + player.h >= m.y) {
+      player.y = m.y - player.h; player.vy = 0; player.onGround = true; player.standOn = m; break;
+    }
+  }
+  // пружины
+  for (const s of level.springs) {
+    if (s.squash > 0) s.squash--;
+    if (player.vy >= 0 && overlap(player, s) && prevBottom <= s.y + 8) { player.y = s.y - player.h; player.vy = SPRING_V; s.squash = 12; player.onGround = false; if (state.mode !== 'demo') SFX.spring(); }
+  }
   if (player.x + player.w > level.w * TILE) player.x = level.w * TILE - player.w;
-
   if (player.vx !== 0 && player.onGround) player.walk += Math.abs(player.vx) * 0.12;
+  if (player.y > H + 40) { if (state.mode === 'demo') { placePlayer(player.x + 96); } else { player.invuln = 0; hurt(); } return; }
+  for (const sp of level.spikes) if (overlap(player, sp)) hurt();
 
-  if (player.y > H + 40) { loseLife(); return; }   // упал в яму
-
-  // Жуки: включаются, когда подходят к экрану; падают, разворачиваются у стен и краёв.
+  // враги
   for (const e of level.enemies) {
     if (!e.alive) { if (e.squash > 0) e.squash--; continue; }
     if (!e.active) { if (e.x < camX + W + 32) e.active = true; else continue; }
-    e.vy = Math.min(e.vy + GRAV, MAXFALL);
-    const vx = e.vx;
-    e.onGround = false;
-    if (moveAxis(e, 'x')) e.vx = -vx;
-    moveAxis(e, 'y');
-    if (e.onGround) {
-      const aheadX = e.vx < 0 ? e.x - 1 : e.x + e.w + 1;
-      const below = Math.floor((e.y + e.h + 1) / TILE);
-      if (!solid(Math.floor(aheadX / TILE), below)) e.vx = -e.vx;   // край - назад
+    if (e.kind === 'bee') {
+      e.x += e.vx; e.y = e.base + Math.sin(state.frame * 0.06 + e.home) * 18;
+      if (e.x < e.home - e.range || e.x > e.home + e.range) e.vx = -e.vx;
+    } else {
+      e.vy = Math.min(e.vy + GRAV, MAXFALL);
+      const vx = e.vx; e.onGround = false;
+      if (moveAxis(e, 'x')) e.vx = -vx;
+      moveAxis(e, 'y');
+      if (e.onGround) { const ax = e.vx < 0 ? e.x - 1 : e.x + e.w + 1; if (!solid(Math.floor(ax / TILE), Math.floor((e.y + e.h + 1) / TILE))) e.vx = -e.vx; }
+      if (e.y > H + 40) { e.alive = false; continue; }
     }
-    if (e.y > H + 40) { e.alive = false; continue; }
     if (overlap(player, e)) {
-      if (player.vy > 0 && prevBottom <= e.y + 8) {
-        killEnemy(e, 100);
-        player.vy = (jumpDown ? JUMP_V * 0.9 : -7);
-      } else {
-        loseLife();
-        return;
-      }
+      if (player.vy > 0 && prevBottom <= e.y + 8) { killEnemy(e); player.vy = jumpDown ? JUMP_V * 0.9 : -7; }
+      else { hurt(); return; }
     }
   }
+  for (const c of level.coins) if (!c.taken && overlap(player, c)) { c.taken = true; state.coins++; state.score += 100; totals.coins++; if (state.mode !== 'demo') SFX.coin(); }
+  for (let i = pops.length - 1; i >= 0; i--) { const p = pops[i]; p.y += p.vy; p.vy += 0.4; if (--p.life <= 0) pops.splice(i, 1); }
+  for (const c of level.checkpoints) if (!c.reached && player.x >= c.x) { c.reached = true; state.respawn = { x: c.x }; state.banner = { text: 'Контрольный флажок', t: 70 }; if (state.mode !== 'demo') SFX.coin(); }
 
-  for (const c of level.coins) {
-    if (!c.taken && overlap(player, c)) { c.taken = true; state.coins++; state.score += 100; SFX.coin(); }
-  }
-  for (let i = pops.length - 1; i >= 0; i--) {
-    const p = pops[i]; p.y += p.vy; p.vy += 0.4; if (--p.life <= 0) pops.splice(i, 1);
-  }
+  // босс
+  if (level.boss && !boss && !level.bossDone && player.x > level.arena.a + TILE) spawnBoss();
+  if (boss) updateBoss();
+  updateRocks();
 
-  // Флаг
-  if (player.x + player.w >= level.flagHit) {
-    const bonus = Math.max(100, Math.round((1 - (player.y - level.flagTop) / (10 * TILE - level.flagTop)) * 2000 / 100) * 100);
-    state.score += bonus;
-    state.phase = 'clear';
-    state.timer = 100;
-    SFX.clear();
+  // финиш
+  if (level.flagHit && player.x + player.w >= level.flagHit && (!level.boss || level.bossDone)) {
+    state.phase = 'clear'; state.clearT = 100; state.banner = null;
+    state.score += 1000;
+    if (state.mode !== 'demo') SFX.flag(); else { startDemo(); }
   }
+  if (state.banner && --state.banner.t <= 0) state.banner = null;
 
-  // Камера ведёт героя, но не выходит за уровень
   const target = player.x - W / 3;
   camX += (target - camX) * 0.15;
-  camX = Math.max(0, Math.min(camX, level.w * TILE - W));
+  const lo = lockCam ? lockCam.a : 0, hi = lockCam ? lockCam.b - W : level.w * TILE - W;
+  camX = Math.max(lo, Math.min(camX, Math.max(lo, hi)));
 }
 
-function finish(kind) {
-  state.phase = kind;
-  if (state.score > state.best) { state.best = state.score; saveBest(state.best); }
-  showOverlay(kind === 'won' ? 'ПОБЕДА!' : 'ИГРА ОКОНЧЕНА',
-    'Очки: ' + state.score + ' · рекорд: ' + state.best + ' · Enter или R - ещё раз', 'ИГРАТЬ СНОВА');
+function pilot() {
+  // рука для заставки меню: вправо, прыжок у ямы, стены, шипов и врага
+  const px = player.x + player.w, row = Math.floor((player.y + player.h - 1) / TILE);
+  const tx = Math.floor((px + 12) / TILE);
+  const pitAhead = !solid(tx, row + 1) && !solid(tx + 1, row + 1);
+  const wall = solid(tx, row) || solid(tx, row - 1);
+  const foe = level.enemies.some((e) => e.alive && e.x > player.x && e.x - player.x < 70 && !e.fly);
+  const spike = level.spikes.some((s) => s.x > player.x && s.x - px < 20);
+  return { left: false, right: true, run: false, jumpDown: (player.onGround && (pitAhead || wall || foe || spike)) || (!player.onGround && player.vy < 0) };
 }
 
-function togglePause() {
-  if (state.phase === 'play') { state.phase = 'paused'; showOverlay('ПАУЗА', 'P или Esc - продолжить', 'ПРОДОЛЖИТЬ'); }
-  else if (state.phase === 'paused') { state.phase = 'play'; hideOverlay(); }
+// ================= Боссы =================
+function spawnBoss() {
+  lockCam = { a: level.arena.a - TILE, b: level.arena.b + TILE };
+  const hp = bossHpFor();
+  if (level.boss === 'beetleKing') boss = { kind: 'beetleKing', name: 'Король жуков', x: level.arena.b - 80, y: 10 * TILE - 48, w: 64, h: 48, vx: -1.3 * enemySpeed(), vy: 0, hp, maxHp: hp, inv: 0, t: 0, onGround: true };
+  else boss = { kind: 'golem', name: 'Каменный голем', x: level.arena.b - 80, y: 10 * TILE - 64, w: 56, h: 64, vx: -0.9 * enemySpeed(), vy: 0, hp, maxHp: hp, inv: 0, t: 0, phase: 'walk', phaseT: 160, onGround: true };
+  state.banner = { text: 'Босс: ' + boss.name, t: 120 };
+  kit.refreshMusic();
+}
+function updateBoss() {
+  const b = boss;
+  b.t++; if (b.inv > 0) b.inv--;
+  if (b.kind === 'beetleKing') {
+    if (b.onGround && b.t % 170 === 0) { b.vy = -9; b.onGround = false; b.vx = Math.sign(player.x - b.x) * Math.abs(b.vx); }
+  } else {
+    if (--b.phaseT <= 0) {
+      if (b.phase === 'walk') { b.phase = 'throw'; b.phaseT = 70; }
+      else if (b.phase === 'throw') { b.phase = 'rest'; b.phaseT = 130; }
+      else { b.phase = 'walk'; b.phaseT = 160; }
+    }
+    if (b.phase === 'throw' && b.phaseT % 22 === 0) {
+      const dx = player.x - b.x;
+      rocks.push({ x: b.x + b.w / 2, y: b.y + 10, vx: Math.max(-6, Math.min(6, dx / 60)), vy: -8, r: 9 });
+    }
+  }
+  const moving = b.kind === 'beetleKing' || b.phase === 'walk';
+  b.vy = Math.min(b.vy + GRAV, MAXFALL);
+  const vx = moving ? b.vx : 0;
+  b.x += vx;
+  if (b.x < level.arena.a || b.x + b.w > level.arena.b) { b.vx = -b.vx; b.x = Math.max(level.arena.a, Math.min(b.x, level.arena.b - b.w)); }
+  b.y += b.vy;
+  if (b.y + b.h >= 10 * TILE) { if (!b.onGround && b.kind === 'beetleKing') { if (kit.settings.shake) state.shake = 5; } b.y = 10 * TILE - b.h; b.vy = 0; b.onGround = true; }
+  // удар сверху - по голове; у голема - только когда он отдыхает (шипы спрятаны)
+  if (overlap(player, b) && state.phase === 'play') {
+    const fromTop = player.vy > 0 && player.y + player.h - player.vy <= b.y + 10;
+    const vulnerable = b.kind === 'beetleKing' || b.phase === 'rest';
+    if (fromTop && vulnerable && b.inv === 0) {
+      b.hp--; b.inv = 50; player.vy = -9; SFX.stomp(); burst(b.x + b.w / 2, b.y, '#fff', 14);
+      if (b.kind === 'beetleKing') b.vx *= 1.25;
+      if (b.hp <= 0) bossDefeated();
+    } else if (fromTop && b.inv > 0) player.vy = -7;
+    else hurt();
+  }
+}
+function updateRocks() {
+  for (const r of rocks) {
+    r.vy += 0.35; r.x += r.vx; r.y += r.vy;
+    if (Math.hypot(r.x - (player.x + player.w / 2), r.y - (player.y + player.h / 2)) < r.r + 12) { r.dead = true; hurt(); }
+    if (r.y > 10 * TILE - r.r) { r.dead = true; burst(r.x, r.y, '#8a7f74', 6, 2); }
+  }
+  for (let i = rocks.length - 1; i >= 0; i--) if (rocks[i].dead) rocks.splice(i, 1);
+}
+function bossDefeated() {
+  burst(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ffd23f', 40, 5);
+  SFX.boss(); if (kit.settings.shake) state.shake = 14;
+  kit.unlock(boss.kind === 'beetleKing' ? 'boss1' : 'boss2');
+  if (!state.bossHitTaken) kit.unlock('bossClean');
+  boss = null; rocks.length = 0;
+  level.bossDone = true;
+  const fx = Math.floor(level.arena.b / TILE) - 2;
+  level.flagX = fx * TILE + 14; level.flagHit = fx * TILE - 1; setTile(fx, 9, T.STONE);
+  state.banner = { text: 'Путь к флагу открыт!', t: 120 };
+  state.score += 3000;
+  kit.refreshMusic();
 }
 
-// ---------- Экран поверх холста ----------
-const overlay = document.getElementById('overlay');
-const againBtn = document.getElementById('againBtn');
-function showOverlay(msg, sub, btn) {
-  document.getElementById('msg').textContent = msg;
-  document.getElementById('sub').textContent = sub;
-  againBtn.textContent = btn;
-  overlay.classList.add('show');
+// ================= Итоги уровня =================
+function starsFor() {
+  const all = level.coins.length + countGifts(LEVELS[state.levelIdx].build());
+  return [true, state.coins >= all, state.timer / 60 <= LEVELS[state.levelIdx].par];
 }
-// Скрытая кнопка в Chrome остаётся в фокусе до следующей отрисовки: Enter сразу после
-// клика «нажимал» её ещё раз и обнулял новую игру. Поэтому фокус снимается сразу,
-// а нажатие на невидимую кнопку ничего не делает.
-function hideOverlay() {
-  overlay.classList.remove('show');
-  if (overlay.contains(document.activeElement)) document.activeElement.blur();
+function countGifts(L) { let n = 0; for (const v of L.t) if (v === T.GIFT) n++; return n; }
+function fmtTime(steps) { const s = Math.round(steps / 60); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function starsHtml(st) { return `<span class="stars3">${st.map((x) => (x ? '★' : '<i>★</i>')).join('')}</span>`; }
+function levelComplete() {
+  state.phase = 'done';
+  kit.mode = 'menu';
+  const i = state.levelIdx, st = starsFor();
+  const rec = progress.levels[i] || { stars: [false, false, false], best: 0 };
+  rec.stars = rec.stars.map((v, k) => v || st[k]);
+  rec.best = rec.best ? Math.min(rec.best, state.timer) : state.timer;
+  progress.levels[i] = rec;
+  progress.unlocked = Math.max(progress.unlocked, Math.min(i + 1, LEVELS.length - 1));
+  if (!state.hurtInLevel) kit.unlock('noDeath');
+  if (LEVELS[i].world === 1 && LEVELS[i].boss) kit.unlock('world1');
+  const allStars = LEVELS.every((_, k) => progress.levels[k] && progress.levels[k].stars.every(Boolean));
+  if (allStars) kit.unlock('allStars');
+  if (totals.coins >= 100) kit.unlock('coins100');
+  const last = i === LEVELS.length - 1;
+  if (last) { progress.done = true; kit.unlock('world2'); if (kit.settings.difficulty === 'hard') kit.unlock('hardFinish'); }
+  save();
+  const all = level.coins.length + countGifts(LEVELS[i].build());
+  const body = `<p style="text-align:center">${starsHtml(st)}</p><table>
+    <tr><td>Время</td><td><b>${fmtTime(state.timer)}</b> (норма ${LEVELS[i].par} с)</td></tr>
+    <tr><td>Монеты</td><td>${state.coins} из ${all}</td></tr><tr><td>Очки</td><td>${state.score}</td></tr>
+    <tr><td>Лучшее время</td><td>${fmtTime(rec.best)}</td></tr></table>
+    <p style="color:var(--kit-dim);font-size:13px">Звёзды: пройти уровень · собрать все монеты · уложиться в норму времени.</p>`;
+  if (last) {
+    const got = LEVELS.reduce((n, _, k) => n + (progress.levels[k] ? progress.levels[k].stars.filter(Boolean).length : 0), 0);
+    kit.show({ id: 'victory', title: 'Голем повержен - победа!', wide: true,
+      html: `<p>Солнечная долина и подземелья свободны. Прыгун возвращается домой героем.</p>${body}
+        <p>Всего звёзд: <b>${got} из ${LEVELS.length * 3}</b> · монет за все забеги: ${totals.coins} · жуков раздавлено: ${totals.stomps}</p>
+        <p style="color:var(--kit-dim)">«Прыг-скок» - часть «Игротеки». Герой, жуки, пчёлы и боссы нарисованы кодом, музыка синтезирована. Спасибо за игру!</p>`,
+      row: true, buttons: [{ label: 'Карта уровней', primary: true, onClick: showLevelSelect }, { label: 'В меню', id: 'menu', onClick: () => kit.showMain() }] });
+    return;
+  }
+  kit.show({ id: 'levelClear', title: `Уровень ${LEVELS[i].world}-${(i % 4) + 1} пройден!`, html: body, row: true,
+    buttons: [{ label: 'Дальше', primary: true, id: 'next', onClick: () => startLevel(i + 1) }, { label: 'Ещё раз', id: 'again', onClick: () => startLevel(i) }, { label: 'Карта уровней', id: 'map', onClick: showLevelSelect }] });
 }
-againBtn.addEventListener('click', () => {
-  if (!overlay.classList.contains('show')) return;
-  if (state.phase === 'paused') togglePause(); else newGame();
-});
+function levelFailed() {
+  state.phase = 'over';
+  kit.mode = 'menu';
+  kit.show({ id: 'over', title: 'Жизни кончились', html: `<p>Уровень «${LEVELS[state.levelIdx].name}» не пройден. Открытые уровни и звёзды сохранены.</p><table><tr><td>Монеты</td><td>${state.coins}</td></tr><tr><td>Время</td><td>${fmtTime(state.timer)}</td></tr></table>`, row: true,
+    buttons: [{ label: 'Заново', primary: true, id: 'again', onClick: () => startLevel(state.levelIdx) }, { label: 'Карта уровней', id: 'map', onClick: showLevelSelect }, { label: 'В меню', id: 'menu', onClick: () => kit.showMain() }] });
+}
+function showLevelSelect() {
+  const node = document.createElement('div');
+  for (const w of [1, 2]) {
+    node.appendChild(Object.assign(document.createElement('div'), { className: 'kit-sec', textContent: WORLD_NAMES[w] }));
+    const grid = document.createElement('div'); grid.className = 'kit-grid';
+    LEVELS.forEach((L, i) => {
+      if (L.world !== w) return;
+      const open = i <= progress.unlocked, rec = progress.levels[i];
+      const st = rec ? rec.stars : [false, false, false];
+      const b = kit.btn(`${open ? '' : '🔒 '}${w}-${(i % 4) + 1}${L.boss ? ' · босс' : ''}<small>${L.name}</small><span class="stars3">${st.map((x) => (x ? '★' : '<i>★</i>')).join('')}</span><small>${rec ? 'лучшее ' + fmtTime(rec.best) : '&nbsp;'}</small>`, () => { if (open) startLevel(i); });
+      b.disabled = !open; b.dataset.level = i;
+      grid.appendChild(b);
+    });
+    node.appendChild(grid);
+  }
+  if (kit.topId() === 'levels') kit.pop();
+  kit.show({ id: 'levels', title: 'Карта уровней', node, wide: true, buttons: [{ label: 'Назад', onClick: () => kit.showMain() }], back: () => kit.showMain() });
+}
+function save() { kit.save('progress', progress); kit.save('totals', totals); }
+function loadAll() {
+  progress = Object.assign({ unlocked: 0, levels: {}, done: false }, kit.load('progress', {}));
+  totals = Object.assign({ coins: 0, stomps: 0 }, kit.load('totals', {}));
+}
 
-// ---------- Рисование ----------
+// ================= Рисование =================
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-
+let ctx = canvas.getContext('2d');
 function fitCanvas() {
-  const maxW = Math.min(window.innerWidth - 32, (window.innerHeight - 130) * W / H, 1280);
-  const cssW = Math.max(320, Math.floor(maxW));
-  const cssH = Math.round(cssW * H / W);
-  const dpr = window.devicePixelRatio || 1;
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  const cssW = Math.floor(W * s), cssH = Math.floor(H * s), dpr = devicePixelRatio || 1;
   canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
   canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
-  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
-  ctx.imageSmoothingEnabled = false;
 }
-
 function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
-
+const THEMES = {
+  meadow: { sky: ['#7ec8f0', '#d8f0ff'], hill: '#9fd18b', hill2: '#7cc06a', ground: '#8a5a34', groundDk: '#6e4526', grass: '#4caf50', grassDk: '#2e7d32', cloud: '#ffffff', pit: null },
+  sunset: { sky: ['#f7a35c', '#ffe3b5'], hill: '#c98a6b', hill2: '#b0735a', ground: '#8a5a34', groundDk: '#6e4526', grass: '#6fb04a', grassDk: '#4a7d2e', cloud: '#ffe8d6', pit: '#3a74b8' },
+  cave: { sky: ['#1b1433', '#2d2350'], hill: '#2a2146', hill2: '#3a2d5e', ground: '#4a4068', groundDk: '#332b4d', grass: '#7d6bb8', grassDk: '#5a4a90', cloud: null, pit: '#2a5fa8' },
+  fortress: { sky: ['#2b1016', '#56202a'], hill: '#3d1a20', hill2: '#51232a', ground: '#5a4a48', groundDk: '#3d302e', grass: '#8a6a60', grassDk: '#6a4e46', cloud: null, pit: '#e0521f' },
+};
+function theme() { return THEMES[level.theme]; }
 function drawBackground() {
+  const th = theme();
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#7ec8f0'); g.addColorStop(1, '#d8f0ff');
+  g.addColorStop(0, th.sky[0]); g.addColorStop(1, th.sky[1]);
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   const p1 = camX * 0.2, p2 = camX * 0.5;
-  for (let i = -1; i < 8; i++) {           // облака
+  if (th.cloud) for (let i = -1; i < 8; i++) {
     const x = ((i * 260 - p1) % 2080 + 2080) % 2080 - 200, y = 30 + (i * 37) % 60;
-    rect(x + 10, y, 50, 14, '#fff'); rect(x, y + 10, 72, 14, '#fff'); rect(x + 24, y - 8, 22, 10, '#fff');
+    rect(x + 10, y, 50, 14, th.cloud); rect(x, y + 10, 72, 14, th.cloud); rect(x + 24, y - 8, 22, 10, th.cloud);
   }
-  for (let i = -1; i < 10; i++) {          // дальние холмы
+  if (level.theme === 'cave' || level.theme === 'fortress') {
+    for (let i = -1; i < 12; i++) {                         // сталактиты/зубцы и кристаллы вдали
+      const x = i * 70 - (p1 % 70);
+      ctx.fillStyle = th.hill2; ctx.beginPath(); ctx.moveTo(x, 64); ctx.lineTo(x + 18, 110 + (i % 3) * 12); ctx.lineTo(x + 36, 64); ctx.fill();
+      if (level.theme === 'cave' && i % 2 === 0) { ctx.fillStyle = 'rgba(140,220,255,0.35)'; ctx.beginPath(); ctx.moveTo(x + 40, 300); ctx.lineTo(x + 48, 260); ctx.lineTo(x + 56, 300); ctx.fill(); }
+      if (level.theme === 'fortress' && i % 3 === 0) { rect(x + 30, 150, 6, 16, '#6a4e46'); ctx.fillStyle = `rgba(255,${150 + Math.sin(state.frame / 6 + i) * 60},60,0.9)`; ctx.beginPath(); ctx.arc(x + 33, 146, 5 + Math.sin(state.frame / 5 + i), 0, 7); ctx.fill(); }
+    }
+  }
+  for (let i = -1; i < 10; i++) {
     const x = i * 240 - (p2 % 240);
-    ctx.fillStyle = '#9fd18b';
+    ctx.fillStyle = i % 2 ? th.hill : th.hill2;
     ctx.beginPath(); ctx.moveTo(x, 320); ctx.quadraticCurveTo(x + 120, 190 + (i % 3) * 20, x + 240, 320); ctx.fill();
   }
 }
-
-function drawTile(t, sx, sy) {
+function drawTile(t, sx, sy, tx, ty) {
+  const th = theme();
   switch (t) {
     case T.GROUND:
-      rect(sx, sy, TILE + 1, TILE, '#8a5a34');   // +1: без щелей между клетками при масштабе
-      rect(sx + 4, sy + 12, 6, 4, '#6e4526'); rect(sx + 18, sy + 22, 8, 4, '#6e4526');
-      if (tileAt(Math.floor((sx + camX) / TILE), Math.floor(sy / TILE) - 1) === T.EMPTY) {
-        rect(sx, sy, TILE + 1, 7, '#4caf50'); rect(sx, sy + 7, TILE + 1, 2, '#2e7d32');
-      }
+      rect(sx, sy, TILE + 1, TILE, th.ground);
+      rect(sx + 4, sy + 12, 6, 4, th.groundDk); rect(sx + 18, sy + 22, 8, 4, th.groundDk);
+      if (tileAt(tx, ty - 1) === T.EMPTY) { rect(sx, sy, TILE + 1, 7, th.grass); rect(sx, sy + 7, TILE + 1, 2, th.grassDk); }
       break;
     case T.BRICK:
-      rect(sx, sy, TILE, TILE, '#b5533c');
-      rect(sx, sy + 15, TILE, 2, '#6d2c1f'); rect(sx, sy + 30, TILE, 2, '#6d2c1f');
+      rect(sx, sy, TILE, TILE, '#b5533c'); rect(sx, sy + 15, TILE, 2, '#6d2c1f'); rect(sx, sy + 30, TILE, 2, '#6d2c1f');
       rect(sx + 15, sy, 2, 15, '#6d2c1f'); rect(sx + 6, sy + 17, 2, 13, '#6d2c1f'); rect(sx + 24, sy + 17, 2, 13, '#6d2c1f');
       break;
     case T.GIFT: {
-      const glow = Math.floor(state.frame / 12) % 3 === 0 ? '#ffe27a' : '#f4c430';
-      rect(sx, sy, TILE, TILE, '#7a4a12'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, glow);
-      ctx.fillStyle = '#fff';                 // звезда
-      ctx.beginPath();
-      for (let i = 0; i < 10; i++) {
-        const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 4 : 10;
-        ctx.lineTo(sx + 16 + Math.cos(a) * r, sy + 16 + Math.sin(a) * r);
-      }
+      rect(sx, sy, TILE, TILE, '#7a4a12'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, Math.floor(state.frame / 12) % 3 === 0 ? '#ffe27a' : '#f4c430');
+      ctx.fillStyle = '#fff'; ctx.beginPath();
+      for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 4 : 10; ctx.lineTo(sx + 16 + Math.cos(a) * r, sy + 16 + Math.sin(a) * r); }
       ctx.fill();
       break;
     }
-    case T.USED:
-      rect(sx, sy, TILE, TILE, '#5a4632'); rect(sx + 3, sy + 3, TILE - 6, TILE - 6, '#8c7358');
-      break;
-    case T.STONE:
-      rect(sx, sy, TILE, TILE, '#7d8391'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, '#9aa1b0');
-      rect(sx + 2, sy + TILE - 5, TILE - 4, 3, '#6a707c');
-      break;
-    case T.PILLAR:
-      rect(sx, sy, TILE, TILE, '#8e8a80'); rect(sx + 4, sy, 4, TILE, '#b9b5aa'); rect(sx + TILE - 6, sy, 4, TILE, '#6d695f');
-      break;
-    case T.PILLAR_TOP:
-      rect(sx - 2, sy, TILE + 4, 10, '#b9b5aa'); rect(sx, sy + 10, TILE, TILE - 10, '#8e8a80');
-      rect(sx + 4, sy + 10, 4, TILE - 10, '#b9b5aa');
-      break;
+    case T.USED: rect(sx, sy, TILE, TILE, '#5a4632'); rect(sx + 3, sy + 3, TILE - 6, TILE - 6, '#8c7358'); break;
+    case T.STONE: rect(sx, sy, TILE, TILE, '#6d7382'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, '#8f96a6'); rect(sx + 2, sy + TILE - 5, TILE - 4, 3, '#5d6270'); break;
+    case T.PILLAR: rect(sx, sy, TILE, TILE, '#8e8a80'); rect(sx + 4, sy, 4, TILE, '#b9b5aa'); rect(sx + TILE - 6, sy, 4, TILE, '#6d695f'); break;
+    case T.PILLAR_TOP: rect(sx - 2, sy, TILE + 4, 10, '#b9b5aa'); rect(sx, sy + 10, TILE, TILE - 10, '#8e8a80'); rect(sx + 4, sy + 10, 4, TILE - 10, '#b9b5aa'); break;
   }
 }
-
 function drawHero() {
+  if (player.invuln > 0 && Math.floor(player.invuln / 4) % 2 === 0 && state.mode !== 'demo' && state.phase === 'play') return;
   const sx = Math.floor(player.x - camX), sy = Math.floor(player.y);
   ctx.save();
   if (player.facing < 0) { ctx.translate(sx + player.w, sy); ctx.scale(-1, 1); } else ctx.translate(sx, sy);
+  if (state.phase === 'dying') { ctx.translate(11, 15); ctx.rotate(state.dyingT * 0.2); ctx.translate(-11, -15); }
   const step = player.onGround && Math.abs(player.vx) > 0.2 ? Math.floor(player.walk) % 2 : 0;
-  rect(2, 0, 18, 12, '#1f9e8f');                 // капюшон
-  rect(5, 3, 14, 9, '#ffe0c2');                  // лицо
-  rect(13, 5, 3, 4, '#1b1b2f');                  // глаз
-  rect(8, 10, 8, 1, '#c77b5a');                  // улыбка
-  rect(2, 12, 18, 11, '#1f9e8f');                // куртка
-  rect(4, 14, 14, 3, '#ffd23f');                 // шарф
-  rect(19, 15, 3, 6, '#ffe0c2');                 // рука
+  rect(2, 0, 18, 12, '#1f9e8f'); rect(5, 3, 14, 9, '#ffe0c2'); rect(13, 5, 3, 4, '#1b1b2f'); rect(8, 10, 8, 1, '#c77b5a');
+  rect(2, 12, 18, 11, '#1f9e8f'); rect(4, 14, 14, 3, '#ffd23f'); rect(19, 15, 3, 6, '#ffe0c2');
   if (!player.onGround) { rect(2, 23, 7, 5, '#34406b'); rect(13, 21, 7, 5, '#34406b'); rect(1, 27, 8, 3, '#e8612c'); rect(13, 25, 9, 3, '#e8612c'); }
   else if (step) { rect(1, 23, 7, 4, '#34406b'); rect(14, 23, 7, 4, '#34406b'); rect(0, 27, 8, 3, '#e8612c'); rect(15, 27, 8, 3, '#e8612c'); }
   else { rect(4, 23, 6, 4, '#34406b'); rect(12, 23, 6, 4, '#34406b'); rect(3, 27, 8, 3, '#e8612c'); rect(12, 27, 8, 3, '#e8612c'); }
   ctx.restore();
 }
-
-function drawBeetle(e) {
+function drawBeetle(e, sx, sy, scale = 1, color = '#6a3fa0', dark = '#4b2a78') {
+  const w = e.w, legs = Math.floor(state.frame / 8) % 2;
+  ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(sx + w / 2, sy + 14 * scale, w / 2, 13 * scale, 0, Math.PI, 0); ctx.fill();
+  rect(sx, sy + 13 * scale, w, 5 * scale, dark);
+  rect(sx + 7 * scale, sy + 5 * scale, 4 * scale, 4 * scale, '#c9a8ff'); rect(sx + w - 11 * scale, sy + 8 * scale, 4 * scale, 4 * scale, '#c9a8ff');
+  const hx = e.vx < 0 ? sx - 2 : sx + w - 6 * scale;
+  rect(hx, sy + 10 * scale, 8 * scale, 8 * scale, '#2d1a4a'); rect(hx + (e.vx < 0 ? 1 : 4) * scale, sy + 12 * scale, 3 * scale, 3 * scale, '#fff');
+  for (let i = 0; i < 3; i++) rect(sx + 3 * scale + i * (w - 6 * scale) / 2 + (i % 2 ? -legs : legs) * 2, sy + 18 * scale, 3 * scale, 6 * scale, '#2d1a4a');
+}
+function drawEnemy(e) {
   const sx = Math.floor(e.x - camX), sy = Math.floor(e.y);
   if (!e.alive) {
-    if (e.squash <= 0) return;
+    if (e.squash <= 0 || e.kind === 'bee') return;
     rect(sx + 2, sy + e.h - 8, e.w - 4, 8, '#6a3fa0'); rect(sx + 6, sy + e.h - 6, 4, 2, '#fff');
     return;
   }
-  const legs = Math.floor(state.frame / 8) % 2;
-  ctx.fillStyle = '#6a3fa0';
-  ctx.beginPath(); ctx.ellipse(sx + e.w / 2, sy + 14, e.w / 2, 13, 0, Math.PI, 0); ctx.fill();
-  rect(sx, sy + 13, e.w, 5, '#4b2a78');
-  rect(sx + 7, sy + 5, 4, 4, '#c9a8ff'); rect(sx + 17, sy + 8, 4, 4, '#c9a8ff');
-  const hx = e.vx < 0 ? sx - 2 : sx + e.w - 6;
-  rect(hx, sy + 10, 8, 8, '#2d1a4a'); rect(hx + (e.vx < 0 ? 1 : 4), sy + 12, 3, 3, '#fff');
-  rect(sx + 3 + legs * 2, sy + 18, 3, 6, '#2d1a4a'); rect(sx + 12 - legs * 2, sy + 18, 3, 6, '#2d1a4a'); rect(sx + 21 + legs * 2, sy + 18, 3, 6, '#2d1a4a');
+  if (e.kind === 'bee') {
+    const flap = Math.floor(state.frame / 4) % 2;
+    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.ellipse(sx + 13, sy + 12, 12, 8, 0, 0, 7); ctx.fill();
+    rect(sx + 8, sy + 5, 3, 14, '#2d1a1a'); rect(sx + 15, sy + 5, 3, 14, '#2d1a1a');
+    ctx.fillStyle = 'rgba(220,240,255,0.85)'; ctx.beginPath(); ctx.ellipse(sx + 12, sy + (flap ? 2 : 5), 7, 4, -0.4, 0, 7); ctx.fill();
+    rect(e.vx < 0 ? sx : sx + 22, sy + 10, 4, 4, '#1b1b2f');
+    return;
+  }
+  drawBeetle(e, sx, sy);
 }
-
+function drawBoss() {
+  const b = boss, sx = Math.floor(b.x - camX), sy = Math.floor(b.y);
+  if (b.inv > 0 && Math.floor(b.inv / 4) % 2 === 0) ctx.globalAlpha = 0.5;
+  if (b.kind === 'beetleKing') {
+    drawBeetle(b, sx, sy + 4, 1.75, '#3d7a3a', '#2a5428');
+    ctx.fillStyle = '#ffd23f';                               // корона
+    ctx.beginPath(); ctx.moveTo(sx + 18, sy + 6); ctx.lineTo(sx + 22, sy - 10); ctx.lineTo(sx + 30, sy); ctx.lineTo(sx + 34, sy - 12); ctx.lineTo(sx + 40, sy); ctx.lineTo(sx + 46, sy - 10); ctx.lineTo(sx + 48, sy + 6); ctx.fill();
+  } else {
+    const rest = b.phase === 'rest';
+    rect(sx, sy + 8, b.w, b.h - 8, '#7a6f66'); rect(sx + 4, sy + 12, b.w - 8, b.h - 20, '#948878');
+    rect(sx + 10, sy + 22, 10, 6, rest ? '#3a3a3a' : '#ff5a2a'); rect(sx + b.w - 20, sy + 22, 10, 6, rest ? '#3a3a3a' : '#ff5a2a');
+    rect(sx - 8, sy + 26, 10, 22, '#7a6f66'); rect(sx + b.w - 2, sy + 26, 10, 22, '#7a6f66');
+    if (!rest) { ctx.fillStyle = '#c8c0b6'; for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.moveTo(sx + 6 + i * 13, sy + 8); ctx.lineTo(sx + 12 + i * 13, sy - 8); ctx.lineTo(sx + 18 + i * 13, sy + 8); ctx.fill(); } }
+    else { ctx.fillStyle = '#fff'; ctx.font = 'bold 14px "Segoe UI"'; ctx.fillText('z', sx + b.w - 6, sy - 4 - (state.frame / 10) % 10); }
+  }
+  ctx.globalAlpha = 1;
+}
 function drawCoin(c) {
   if (c.taken) return;
-  const sx = Math.floor(c.x - camX), ph = Math.floor(state.frame / 8) % 4;
-  const w = [12, 8, 3, 8][ph];
+  const sx = Math.floor(c.x - camX), w = [12, 8, 3, 8][Math.floor(state.frame / 8) % 4];
   rect(sx + 8 - w / 2, c.y + 2, w, 16, '#ffd23f');
   if (w > 4) rect(sx + 8 - w / 2 + 2, c.y + 5, Math.max(1, w - 6), 10, '#e8a317');
 }
-
 function drawFlag() {
+  if (!level.flagX || (level.boss && !level.bossDone)) return;
   const sx = Math.floor(level.flagX - camX);
   rect(sx, level.flagTop, 4, 10 * TILE - level.flagTop - TILE, '#e8e8e8');
   rect(sx - 3, level.flagTop - 8, 10, 10, '#ffd23f');
-  ctx.fillStyle = '#e8612c';
-  ctx.beginPath(); ctx.moveTo(sx + 4, level.flagTop + 6); ctx.lineTo(sx + 40, level.flagTop + 20); ctx.lineTo(sx + 4, level.flagTop + 34); ctx.fill();
+  ctx.fillStyle = '#e8612c'; ctx.beginPath(); ctx.moveTo(sx + 4, level.flagTop + 6); ctx.lineTo(sx + 40, level.flagTop + 20); ctx.lineTo(sx + 4, level.flagTop + 34); ctx.fill();
 }
-
+function drawMisc() {
+  const th = theme();
+  // лава или вода в ямах
+  if (th.pit) for (let tx = Math.floor(camX / TILE); tx < Math.floor(camX / TILE) + W / TILE + 2; tx++) {
+    if (tileAt(tx, 11) === T.EMPTY && tileAt(tx, 10) === T.EMPTY && tx < level.w) {
+      const sx = tx * TILE - camX;
+      rect(sx, 11 * TILE + 10, TILE + 1, TILE - 10, th.pit);
+      rect(sx + ((state.frame / 3) % 16), 11 * TILE + 12, 8, 2, 'rgba(255,255,255,0.35)');
+    }
+  }
+  for (const m of level.movers) { const sx = m.x - camX; rect(sx, m.y, m.w, m.h, '#8a6a4a'); rect(sx, m.y, m.w, 3, '#c9a37a'); for (let i = 6; i < m.w; i += 16) rect(sx + i, m.y + 5, 4, 4, '#5a4432'); }
+  for (const s of level.springs) { const sx = s.x - camX, sq = s.squash > 0 ? 6 : 0; rect(sx, s.y + 12, s.w, 4, '#555'); for (let i = 0; i < 3; i++) rect(sx + 4, s.y + 4 + sq / 2 + i * (3 - sq / 6), s.w - 8, 2, '#c0c0c0'); rect(sx - 2, s.y + sq, s.w + 4, 5, '#e8612c'); }
+  for (const sp of level.spikes) { const sx = sp.x - camX; ctx.fillStyle = '#d8d8e0'; for (let x = 0; x < sp.w; x += 8) { ctx.beginPath(); ctx.moveTo(sx + x, sp.y + sp.h); ctx.lineTo(sx + x + 4, sp.y); ctx.lineTo(sx + x + 8, sp.y + sp.h); ctx.fill(); } }
+  for (const c of level.checkpoints) { const sx = c.x - camX; rect(sx, 10 * TILE - 44, 3, 44, '#e8e8e8'); ctx.fillStyle = c.reached ? '#4caf50' : '#9aa0b8'; ctx.beginPath(); ctx.moveTo(sx + 3, 10 * TILE - 44); ctx.lineTo(sx + 22, 10 * TILE - 37); ctx.lineTo(sx + 3, 10 * TILE - 30); ctx.fill(); }
+  for (const r of rocks) { ctx.fillStyle = '#8a7f74'; ctx.beginPath(); ctx.arc(r.x - camX, r.y, r.r, 0, 7); ctx.fill(); rect(r.x - camX - 3, r.y - 4, 4, 3, '#a89c8e'); }
+}
+function hudText(t, x, y, size, color = '#fff', align = 'left') {
+  ctx.font = `bold ${size}px "Segoe UI", Arial, sans-serif`; ctx.textAlign = align;
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillText(t, x + 2, y + 2); ctx.fillStyle = color; ctx.fillText(t, x, y); ctx.textAlign = 'left';
+}
+function heart(x, y, full) {
+  ctx.fillStyle = full ? '#ff4d6d' : 'rgba(0,0,0,.3)';
+  ctx.beginPath(); ctx.moveTo(x, y + 4); ctx.bezierCurveTo(x, y, x - 7, y, x - 7, y + 4); ctx.bezierCurveTo(x - 7, y + 8, x, y + 11, x, y + 13); ctx.bezierCurveTo(x, y + 11, x + 7, y + 8, x + 7, y + 4); ctx.bezierCurveTo(x + 7, y, x, y, x, y + 4); ctx.fill();
+}
+let bannerRect = null;
+function drawHud() {
+  bannerRect = null;
+  if (state.mode === 'demo') return;
+  const L = LEVELS[state.levelIdx];
+  rect(0, 0, W, 30, 'rgba(10,14,30,0.55)');
+  hudText(`${L.world}-${(state.levelIdx % 4) + 1} ${L.name}`, 10, 21, 15);
+  rect(250, 9, 10, 14, '#ffd23f'); hudText(String(state.coins), 266, 21, 15, '#ffd23f');
+  for (let i = 0; i < Math.min(state.lives, 6); i++) heart(330 + i * 18, 8, true);
+  hudText('⏱ ' + fmtTime(state.timer), W - 10, 21, 15, '#fff', 'right');
+  if (boss) {
+    hudText(boss.name, W / 2, 50, 14, '#ffd23f', 'center');
+    for (let i = 0; i < boss.maxHp; i++) { rect(W / 2 - boss.maxHp * 14 + i * 28, 56, 22, 8, i < boss.hp ? '#ff4d6d' : 'rgba(0,0,0,.35)'); }
+  }
+  if (state.banner && kit.mode === 'play') {
+    ctx.globalAlpha = Math.min(1, state.banner.t / 25);
+    hudText(state.banner.text, W / 2, 120, 26, '#ffffff', 'center');
+    ctx.globalAlpha = 1;
+    const w = ctx.measureText(state.banner.text).width;
+    bannerRect = { x: W / 2 - w / 2, y: 96, w, h: 32 };
+  }
+}
 function render() {
+  const k = canvas.width / W;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  if (state.shake > 0.5) ctx.translate((rnd() - 0.5) * state.shake, (rnd() - 0.5) * state.shake);
   drawBackground();
   const x0 = Math.floor(camX / TILE), x1 = Math.min(level.w - 1, x0 + Math.ceil(W / TILE) + 1);
-  for (let ty = 0; ty < ROWS; ty++) for (let tx = x0; tx <= x1; tx++) {
-    const t = level.t[ty * level.w + tx];
-    if (t) drawTile(t, Math.floor(tx * TILE - camX), ty * TILE);
-  }
+  for (let ty = 0; ty < ROWS; ty++) for (let tx = x0; tx <= x1; tx++) { const t = level.t[ty * level.w + tx]; if (t) drawTile(t, Math.floor(tx * TILE - camX), ty * TILE, tx, ty); }
+  drawMisc();
   drawFlag();
   for (const c of level.coins) drawCoin(c);
-  for (const e of level.enemies) drawBeetle(e);
+  for (const e of level.enemies) drawEnemy(e);
+  if (boss) drawBoss();
   for (const p of pops) rect(Math.floor(p.x - camX) - 5, p.y, 10, 14, '#ffd23f');
-  if (state.phase !== 'ready') drawHero();
-  if (state.phase === 'clear') {
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px Consolas, monospace'; ctx.textAlign = 'center';
-    ctx.fillText(state.levelIdx + 1 < LEVELS.length ? 'УРОВЕНЬ ПРОЙДЕН!' : 'ФИНИШ!', W / 2, 120);
-    ctx.textAlign = 'left';
-  }
-  if (muted) { ctx.fillStyle = '#1b1b2f'; ctx.font = '12px Consolas, monospace'; ctx.fillText('звук выкл (M)', 8, 16); }
+  drawHero();
+  for (const q of particles) { ctx.globalAlpha = Math.max(0, q.life / 50); rect(q.x - camX, q.y, 3, 3, q.color); }
+  ctx.globalAlpha = 1;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  drawHud();
 }
 
-let hudCache = '';
-function updateHud() {
-  const s = [state.score, state.coins, state.levelIdx, state.lives, state.best].join('|');
-  if (s === hudCache) return;
-  hudCache = s;
-  document.getElementById('score').textContent = String(state.score).padStart(6, '0');
-  document.getElementById('coins').textContent = String(state.coins).padStart(2, '0');
-  document.getElementById('level').textContent = state.levelIdx + 1;
-  document.getElementById('lives').textContent = Math.max(0, state.lives);
-  document.getElementById('best').textContent = Math.max(state.best, state.score);
-}
-
-// ---------- Ввод ----------
-addEventListener('keydown', (e) => {
-  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
-  if (e.code === 'KeyM') { muted = !muted; return; }
-  if (e.code === 'KeyP' || e.code === 'Escape') { togglePause(); return; }
-  if (['ready', 'over', 'won'].includes(state.phase)) {
-    if (e.code === 'Enter' || e.code === 'KeyR' || (state.phase === 'ready' && e.code === 'Space')) { e.preventDefault(); newGame(); }
-    return;
-  }
-  if (e.code === 'KeyR') { newGame(); return; }
-  keys[e.code] = true;
+// ================= Каркас =================
+const MUSIC = {
+  menu: { bpm: 112, voices: [
+    { type: 'square', vol: 0.045, notes: 'C5 . E5 . G5 . E5 . F5 . A5 . G5 - - . E5 . G5 . C6 . G5 . F5 . D5 . C5 - - .' },
+    { type: 'triangle', vol: 0.12, notes: 'C3 . G3 . C3 . G3 . F2 . C3 . G2 . D3 . C3 . G3 . A2 . E3 . F2 . C3 . G2 . G2 .' } ], drums: 'k.h.s.h.' },
+  game: { bpm: 132, voices: [
+    { type: 'square', vol: 0.045, notes: 'E5 E5 . E5 . C5 E5 . G5 - - . G4 - - . C5 . . G4 . . E4 . . A4 . B4 . A#4 A4 . G4 E5 G5 A5 . F5 G5 . E5 . C5 D5 B4 . . .' },
+    { type: 'triangle', vol: 0.12, notes: 'C3 . . G2 . . C3 . F2 . . C3 . . F2 . G2 . . D3 . . G2 . C3 . . G2 . . C3 .' } ], drums: 'k.hsk.hs' },
+  cave: { bpm: 104, voices: [
+    { type: 'triangle', vol: 0.08, notes: 'A4 . C5 . E5 . D5 . C5 . A4 . G4 - - . A4 . C5 . E5 . G5 . F5 . E5 . D5 - - .' },
+    { type: 'sine', vol: 0.14, notes: 'A2 - - - E2 - - - F2 - - - E2 - - -' } ], drums: 'k...h...s...h...' },
+  boss: { bpm: 150, voices: [
+    { type: 'sawtooth', vol: 0.035, notes: 'D5 D5 F5 D5 G5 . F5 . D5 D5 F5 D5 A5 . G5 .' },
+    { type: 'square', vol: 0.05, notes: 'D2 D2 D3 D2 D2 D2 D3 D2 A#1 A#1 A#2 A#1 C2 C2 C3 C2' } ], drums: 'k.k.s.k.k.k.s.ss' },
+};
+kit = GameKit.create({
+  id: 'jumper',
+  root: document.getElementById('app'),
+  theme: { accent: '#ffd23f', accent2: '#e8612c', panel: 'rgba(22,28,58,0.95)', shade: 'rgba(10,14,30,.25)' },
+  actions: {
+    left: { label: 'Влево', keys: ['ArrowLeft', 'KeyA'], pad: ['b14', 'a0-'] },
+    right: { label: 'Вправо', keys: ['ArrowRight', 'KeyD'], pad: ['b15', 'a0+'] },
+    jump: { label: 'Прыжок', keys: ['Space', 'ArrowUp'], pad: ['b0', 'b12'] },
+    run: { label: 'Бег', keys: ['ShiftLeft', 'KeyX'], pad: ['b2', 'b7'] },
+    pause: { label: 'Пауза', keys: ['KeyP'], pad: [] },
+  },
+  music: MUSIC,
+  difficultyNote: 'Лёгкая: 5 жизней на уровень, жуки медленнее, боссу хватит 2 ударов. Обычная: 3 жизни, 3 удара. Трудная: 2 жизни, жуки быстрее, 4 удара.',
+  achievements: [
+    { id: 'world1', name: 'Долина спасена', desc: 'Победить Короля жуков' },
+    { id: 'world2', name: 'Герой подземелий', desc: 'Победить каменного голема и пройти игру' },
+    { id: 'boss1', name: 'Корона упала', desc: 'Три раза прыгнуть на Короля жуков' },
+    { id: 'boss2', name: 'Камень рассыпался', desc: 'Победить голема, пока он отдыхает' },
+    { id: 'bossClean', name: 'Ни царапины', desc: 'Победить босса без потери жизни' },
+    { id: 'noDeath', name: 'С первого раза', desc: 'Пройти уровень, ни разу не погибнув' },
+    { id: 'allStars', name: 'Звездочёт', desc: 'Собрать все 24 звезды' },
+    { id: 'coins100', name: 'Копилка', desc: 'Собрать 100 монет за все забеги' },
+    { id: 'stomp50', name: 'Гроза жуков', desc: 'Раздавить 50 врагов' },
+    { id: 'hardFinish', name: 'Стальные пятки', desc: 'Пройти игру на трудной сложности' },
+  ],
+  howto: `<p><b>Два мира по четыре уровня</b>: Солнечная долина и Подземелья. Четвёртый уровень мира - логово босса. Флажки посреди уровня - контрольные точки.</p>
+    <p><b>Звёзды</b> за уровень: пройти, собрать все монеты (и из подарочных блоков), уложиться в норму времени.</p>
+    <p><b>Управление</b>: ← → или A/D - ходить, Shift или X - бежать, Пробел или ↑ - прыжок (держите - выше). Геймпад тоже работает.</p>
+    <p>Прыгайте на жуков и пчёл сверху. Подарочный блок бейте снизу. Оранжевая пружина подбрасывает высоко. Шипы и ямы опасны. Короля жуков бейте прыжком по голове, голема - только когда он отдыхает и спрятал шипы.</p>`,
+  credits: `<p><b>Прыг-скок</b> - фан-версия, не связана с правообладателем, часть «Игротеки».</p><p>Герой, жуки, пчёлы, блоки и боссы нарисованы кодом, музыка и звуки синтезируются WebAudio. Ни одного файла из интернета.</p>`,
+  drawLogo(g, w, h, t) {
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = 'bold 62px "Segoe UI", Arial, sans-serif';
+    const y = h / 2 + 4 - Math.abs(Math.sin(t * 4)) * 8;
+    g.lineWidth = 8; g.strokeStyle = '#1b1b2f'; g.strokeText('ПРЫГ-СКОК', w / 2, y);
+    const grd = g.createLinearGradient(0, y - 30, 0, y + 30); grd.addColorStop(0, '#ffe27a'); grd.addColorStop(1, '#e8612c');
+    g.fillStyle = grd; g.fillText('ПРЫГ-СКОК', w / 2, y);
+  },
+  game: {
+    menuItems() {
+      const items = [];
+      const next = Math.min(progress.unlocked, LEVELS.length - 1);
+      if (progress.unlocked > 0 && !progress.done) items.push({ label: `Продолжить · уровень ${LEVELS[next].world}-${(next % 4) + 1}`, primary: true, id: 'continue', onClick: () => startLevel(next) });
+      items.push({ label: progress.unlocked > 0 ? 'Играть с начала' : 'Играть', primary: !(progress.unlocked > 0 && !progress.done), id: 'play', onClick: () => startLevel(0) });
+      items.push({ label: 'Карта уровней', id: 'levels', onClick: showLevelSelect });
+      return items;
+    },
+    musicFor() { return boss ? 'boss' : (level && (level.theme === 'cave' || level.theme === 'fortress') ? 'cave' : 'game'); },
+    onRestart() { startLevel(state.levelIdx); },
+    onQuit() { startDemo(); },
+    onResetProgress() { loadAll(); },
+    recordsHtml() {
+      const got = LEVELS.reduce((n, _, k) => n + (progress.levels[k] ? progress.levels[k].stars.filter(Boolean).length : 0), 0);
+      return `<table><tr><td>Звёзды</td><td><b>${got} из ${LEVELS.length * 3}</b></td></tr>
+        ${LEVELS.map((L, k) => { const r = progress.levels[k]; return `<tr><td>${L.world}-${(k % 4) + 1} ${L.name}</td><td>${r ? starsHtml(r.stars) + ' ' + fmtTime(r.best) : (k <= progress.unlocked ? 'не пройден' : '🔒')}</td></tr>`; }).join('')}
+        <tr><td>Монет за все забеги / жуков</td><td>${totals.coins} / ${totals.stomps}</td></tr></table>`;
+    },
+  },
 });
-addEventListener('keyup', (e) => { keys[e.code] = false; });
-addEventListener('blur', () => {
-  for (const k in keys) keys[k] = false;
-  if (state.phase === 'play') togglePause();
-});
-addEventListener('resize', fitCanvas);
 
-// ---------- Цикл: физика фиксированными шагами ----------
 let last = performance.now(), acc = 0;
 function loop(now) {
   acc += Math.min(now - last, 250);
   last = now;
-  while (acc >= STEP_MS) { update(); acc -= STEP_MS; }
+  while (acc >= STEP_MS) {
+    if ((kit.mode === 'play' && state.mode === 'level') || (kit.mode === 'menu' && state.mode === 'demo')) update();
+    kit.endStep();
+    acc -= STEP_MS;
+  }
   render();
-  updateHud();
+  kit.countFrame();
   requestAnimationFrame(loop);
 }
-
-loadLevel(0);
+addEventListener('resize', fitCanvas);
+loadAll();
 fitCanvas();
-showOverlay('ПРЫГ-СКОК', 'Дойди до флага на двух уровнях. Прыгай на жуков сверху. Enter или Пробел - старт', 'ИГРАТЬ');
+startDemo();
+kit.showMain();
 requestAnimationFrame(loop);
 
-// ---------- Крючок для проверок ----------
+// ================= Крючок для проверок =================
 window.__game = {
-  ready: true,
-  state, player, keys, T, TILE,
-  get level() { return level; },
-  get camX() { return camX; },
-  step(n = 1) { for (let i = 0; i < n; i++) update(); render(); updateHud(); },
-  newGame, loadLevel, tileAt, setTile,
-  // Поставить жука в клетку (tx, ty - клетка, на которой он стоит сверху).
-  addEnemy(px, py) { const e = { x: px, y: py, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: true }; level.enemies.push(e); return e; },
+  ready: true, T, TILE, W, H, LEVELS, JUMP_V, GRAV, WALK, RUN, SPRING_V,
+  state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, get camX() { return camX; },
+  get progress() { return progress; }, get totals() { return totals; }, get autopilot() { return autopilot; },
+  step(n = 1, draw = true) { for (let i = 0; i < n; i++) { update(); kit.endStep(); } if (draw) render(); },
+  startLevel, startDemo, loadLevel, tileAt, setTile, hurt, starsFor, countGifts,
+  addEnemy(px, py, kind = 'beetle') { const e = kind === 'bee' ? { kind, x: px, y: py, base: py, home: px, range: 64, w: 26, h: 20, vx: 0, vy: 0, fly: true, alive: true, squash: 0, active: true } : { kind, x: px, y: py, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: true }; level.enemies.push(e); return e; },
   clearEnemies() { level.enemies.length = 0; },
+  reseed(n) { rnd = mulberry32(n); },
+  bannerCss() {
+    if (!bannerRect) return null;
+    const c = canvas.getBoundingClientRect(), k = c.width / W;
+    return { left: c.left + bannerRect.x * k, top: c.top + bannerRect.y * k, right: c.left + (bannerRect.x + bannerRect.w) * k, bottom: c.top + (bannerRect.y + bannerRect.h) * k };
+  },
 };
 </script>
 </body>
