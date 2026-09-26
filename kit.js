@@ -427,7 +427,7 @@
       this.layer = document.createElement('div');
       this.layer.className = 'kit-layer';
       root.appendChild(this.layer);
-      this.toastEl = document.createElement('div');
+      this.toastEl = document.createElement('div'); this.toastQ = [];
       this.toastEl.className = 'kit-toast';
       root.appendChild(this.toastEl);
       this.fpsEl = document.createElement('div');
@@ -512,10 +512,17 @@
       i = i < 0 ? 0 : (i + dir + items.length) % items.length;
       items[i].focus();
     }
+    // Не больше двух плашек сразу, остальные ждут очереди - иначе стопка наезжает на окна
     toast(text, icon = '★') {
-      const d = this.el('div', '', `${icon} ${text}`);
-      this.toastEl.appendChild(d);
-      setTimeout(() => d.remove(), 3200);
+      this.toastQ.push(`${icon} ${text}`);
+      this.pumpToast();
+    }
+    pumpToast() {
+      while (this.toastEl.children.length < 2 && this.toastQ.length) {
+        const d = this.el('div', '', this.toastQ.shift());
+        this.toastEl.appendChild(d);
+        setTimeout(() => { d.remove(); this.pumpToast(); }, 2600);
+      }
     }
     confirm(text, onYes) {
       this.show({ id: 'confirm', title: 'Точно?', html: `<p style="text-align:center">${text}</p>`, row: true,

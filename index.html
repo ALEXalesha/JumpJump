@@ -93,10 +93,10 @@ const LEVELS = [
     L.bee(40, 6, 2); L.bee(98, 5, 3);
     L.checkpoint(70); L.stairsUp(134, 3); L.flag(142);
   }) },
-  { world: 1, name: 'Логово Короля жуков', par: 60, boss: true, build: () => makeLevel(64, 'sunset', (L) => {
-    L.ground(0, 63); L.coins(6, 8, 5); L.blocks(10, 6, '?');
+  { world: 1, name: 'Логово Короля жуков', par: 60, boss: true, build: () => makeLevel(48, 'sunset', (L) => {
+    L.ground(0, 47); L.coins(6, 8, 5); L.blocks(10, 6, '?');
     L.pillar(22, 2);
-    L.boss('beetleKing', 26, 62);
+    L.boss('beetleKing', 26, 45);                         // логово целиком на экране
   }) },
   { world: 2, name: 'Хрустальная пещера', par: 80, build: () => makeLevel(150, 'cave', (L) => {
     L.ground(0, 149); L.ceiling(0, 149, 2);
@@ -136,10 +136,10 @@ const LEVELS = [
     L.bee(38, 6, 2); L.bee(90, 6, 3); L.bee(132, 6, 3);
     L.checkpoint(90); L.stairsUp(144, 3); L.flag(152);
   }) },
-  { world: 2, name: 'Трон каменного голема', par: 70, boss: true, build: () => makeLevel(66, 'fortress', (L) => {
-    L.ground(0, 65); L.ceiling(0, 65, 1); L.coins(6, 8, 5); L.blocks(12, 6, '?');
+  { world: 2, name: 'Трон каменного голема', par: 70, boss: true, build: () => makeLevel(48, 'fortress', (L) => {
+    L.ground(0, 47); L.ceiling(0, 47, 1); L.coins(6, 8, 5); L.blocks(12, 6, '?');
     L.pillar(22, 2);
-    L.boss('golem', 26, 64);
+    L.boss('golem', 26, 45);
   }) },
 ];
 const WORLD_NAMES = { 1: 'Мир 1: Солнечная долина', 2: 'Мир 2: Подземелья' };
@@ -392,7 +392,7 @@ function update() {
 // Заставка меню и проверки: перед каждым решением пилот «проигрывает в уме» несколько вариантов
 // (идти, прыгнуть коротко/высоко, шагом/бегом) по тем же правилам движения, что и герой, с
 // платформами, пружинами, шипами, врагами и боссом, и выбирает безопасный вариант, дальше всех ведущий вправо.
-const pilotPlan = { hold: 0, dir: 1, run: false, air: false, back: 0, bestX: 0, stuck: 0 };
+const pilotPlan = { hold: 0, dir: 1, run: false, air: false, back: 0, bestX: 0, stuck: 0, bossDir: 0, bossT: 0 };
 function moverAt(m, t) {
   const off = Math.sin(t * 0.02 * m.speed) * m.range / 2 + m.range / 2;
   return m.axis === 'x' ? { x: m.bx + off, y: m.by } : { x: m.bx, y: m.by - off };
@@ -401,7 +401,7 @@ function simulate(hold, run, dir, frames) {
   const o = { x: player.x, y: player.y, w: player.w, h: player.h, vx: player.vx, vy: player.vy, onGround: player.onGround };
   let on = player.standOn, boost = player.boost, air = false, stompBoss = false, landK = 0, landX = 0;
   const max = run ? RUN : WALK, dead = new Set(), eh = 3;
-  const b = boss, rk = rocks.map((r) => ({ x: r.x, y: r.y, vx: r.vx, vy: r.vy }));
+  const b = boss, bs = b && { x: b.x, y: b.y, vx: b.vx, vy: b.vy, ground: b.onGround }, rk = rocks.map((r) => ({ x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
   const bossPhaseAt = (k) => {
     if (!b || b.kind !== 'golem') return 'any';
     if (k < b.phaseT) return b.phase;
@@ -440,21 +440,33 @@ function simulate(hold, run, dir, frames) {
       if (overlap(o, { x: ex, y: ey, w: e.w, h: e.h })) { dead.add(e); o.vy = jd ? JUMP_V * 0.9 : -7; }
     }
     if (b) {
-      const ph = bossPhaseAt(k), bx = b.x + ((b.kind === 'beetleKing' || ph === 'walk') ? b.vx * k : 0);
-      const box = { x: bx - 4, y: b.y - 2, w: b.w + 8, h: b.h + 2 };
+      // босс движется по своим правилам: Король жуков прыгает раз в 170 кадров в сторону героя
+      const ph = bossPhaseAt(k);
+      if (b.kind === 'beetleKing' && bs.ground && (b.t + k) % 170 === 0) { bs.vy = -9; bs.ground = false; bs.vx = Math.sign(o.x - bs.x) * Math.abs(bs.vx); }
+      bs.vy = Math.min(bs.vy + GRAV, MAXFALL);
+      if (b.kind === 'beetleKing' || ph === 'walk') bs.x += bs.vx;
+      if (bs.x < level.arena.a || bs.x + b.w > level.arena.b) { bs.vx = -bs.vx; bs.x = Math.max(level.arena.a, Math.min(bs.x, level.arena.b - b.w)); }
+      bs.y += bs.vy;
+      if (bs.y + b.h >= 10 * TILE) { bs.y = 10 * TILE - b.h; bs.vy = 0; bs.ground = true; }
+      const bx = bs.x, by = bs.y;
+      const box = { x: bx - 4, y: by - 2, w: b.w + 8, h: b.h + 2 };
       if (overlap(o, box)) {
         const vulnerable = b.kind === 'beetleKing' || ph === 'rest';
-        if (o.vy > 0 && pb - o.vy <= b.y + 10 && vulnerable && (b.inv === 0 || stompBoss)) { stompBoss = true; o.vy = -9; boost = true; } else if (!(o.vy > 0 && pb - o.vy <= b.y + 10)) return { dead: true };
+        const top = o.vy > 0 && pb <= by + 8;                 // с запасом: сбоку - смерть
+        if (!top) return { dead: true };
+        if (vulnerable && (b.inv === 0 || stompBoss) && overlap(o, { x: bx, y: by, w: b.w, h: b.h })) { stompBoss = true; o.vy = -9; boost = true; }
       }
     }
     for (const r of rk) {
+      if (r.done) continue;
       r.vy += 0.35; r.x += r.vx; r.y += r.vy;
-      if (r.y < 10 * TILE - r.r && Math.hypot(r.x - (o.x + o.w / 2), r.y - (o.y + o.h / 2)) < r.r + 18) return { dead: true };
+      // как в игре: сначала попадание, потом камень разбивается о землю
+      if (Math.hypot(r.x - (o.x + o.w / 2), r.y - (o.y + o.h / 2)) < r.r + 18) return { dead: true };
+      if (r.y > 10 * TILE - r.r) r.done = true;
     }
     if (!o.onGround) air = true;
     if (air && o.onGround && k > 2 && !landK) { landK = k; landX = o.x; frames = Math.min(frames, k + 16); dir = 0; hold = 0; }
   }
-  if (landK) return { x: landX, k: landK, landed: true, stompBoss };
   // в воздухе к концу прогона: под героем нет ни земли, ни платформы - это падение в яму
   if (!o.onGround && o.vy > 0) {
     const c0 = Math.floor(o.x / TILE), c1 = Math.floor((o.x + o.w) / TILE);
@@ -462,6 +474,7 @@ function simulate(hold, run, dir, frames) {
     for (let ty = Math.floor((o.y + o.h) / TILE); ty < ROWS && !floor; ty++) for (let tx = c0; tx <= c1; tx++) if (solid(tx, ty)) floor = true;
     if (!floor && !level.movers.some((m) => o.x + o.w > m.bx - 8 && o.x < m.bx + m.w + (m.axis === 'x' ? m.range : 0) + 8)) return { dead: true };
   }
+  if (landK) return { x: landX, k: landK, landed: true, stompBoss };
   return { x: o.x, k: frames, landed: o.onGround, stompBoss };
 }
 function pilot() {
@@ -493,8 +506,18 @@ function pilot() {
       const over = cands.filter((c) => c.dir === -away && (away < 0 ? c.r.x > boss.x + boss.w : c.r.x + player.w < boss.x)).sort((a, b) => a.r.k - b.r.k)[0];
       if (over) return jump(over.hold, over.run, over.dir);
     }
-    const want = danger && (boss.kind === 'golem' || dist < 160) && wall > 40 ? away : boss.kind === 'golem' && !danger ? -away : 0;
-    for (const dir of [want, 0, -want]) if (!simulate(0, false, dir, 30).dead) return out(dir, false, dir !== 0 && boss.kind === 'golem');
+    // голем целится туда, где герой стоит в миг броска: стоять нельзя - уходить, а у стены - бежать под дугой к нему
+    let want = 0;
+    if (boss.kind === 'golem') {
+      // выбранное направление держится ~40 кадров, чтобы не топтаться на месте под камнем
+      if (P.bossT > 0 && danger && (P.bossDir === 0 || (P.bossDir < 0 ? cx - lockCam.a : lockCam.b - cx) > 30)) { P.bossT--; want = P.bossDir; if (want === -away && dist < boss.w / 2 + 40) want = 0; }
+      else { want = !danger ? -away : wall > 90 ? away : dist > boss.w / 2 + 50 ? -away : 0; P.bossDir = want; P.bossT = 40; }
+    }
+    else if (dist < 160 && wall > 40) want = away;
+    for (const dir of [want, 0, -want]) {
+      const run = dir !== 0 && boss.kind === 'golem';
+      if (!simulate(0, run, dir, 30).dead) return out(dir, false, run);
+    }
     const any = cands.sort((a, b) => b.r.k - a.r.k)[0];
     return any ? jump(any.hold, any.run, any.dir) : out(away, false, false);
   }
@@ -531,8 +554,10 @@ function updateBoss() {
       else { b.phase = 'walk'; b.phaseT = 160; }
     }
     if (b.phase === 'throw' && b.phaseT % 22 === 0) {
-      const dx = player.x - b.x;
-      rocks.push({ x: b.x + b.w / 2, y: b.y + 10, vx: Math.max(-6, Math.min(6, dx / 60)), vy: -8, r: 9 });
+      // камень падает туда, где герой стоит сейчас: кто движется - увернётся
+      const x0 = b.x + b.w / 2, y0 = b.y + 10, fall = 10 * TILE - 9 - y0, t = (8 + Math.sqrt(64 + 4 * 0.175 * fall)) / 0.35;
+      const dx = player.x + player.w / 2 - x0;
+      rocks.push({ x: x0, y: y0, vx: Math.max(-7, Math.min(7, dx / t)), vy: -8, r: 9 });
     }
   }
   const moving = b.kind === 'beetleKing' || b.phase === 'walk';
@@ -949,7 +974,7 @@ requestAnimationFrame(loop);
 // ================= Крючок для проверок =================
 window.__game = {
   ready: true, T, TILE, W, H, LEVELS, JUMP_V, GRAV, WALK, RUN, SPRING_V,
-  state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, get camX() { return camX; },
+  state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, rocks, get camX() { return camX; },
   get progress() { return progress; }, get totals() { return totals; }, get autopilot() { return autopilot; },
   step(n = 1, draw = true) { for (let i = 0; i < n; i++) { update(); kit.endStep(); } if (draw) render(); },
   setAutopilot(v) { autopilot = v; }, simulate,
