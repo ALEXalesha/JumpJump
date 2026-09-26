@@ -350,8 +350,15 @@ function showOverlay(msg, sub, btn) {
   againBtn.textContent = btn;
   overlay.classList.add('show');
 }
-function hideOverlay() { overlay.classList.remove('show'); }
+// Скрытая кнопка в Chrome остаётся в фокусе до следующей отрисовки: Enter сразу после
+// клика «нажимал» её ещё раз и обнулял новую игру. Поэтому фокус снимается сразу,
+// а нажатие на невидимую кнопку ничего не делает.
+function hideOverlay() {
+  overlay.classList.remove('show');
+  if (overlay.contains(document.activeElement)) document.activeElement.blur();
+}
 againBtn.addEventListener('click', () => {
+  if (!overlay.classList.contains('show')) return;
   if (state.phase === 'paused') togglePause(); else newGame();
 });
 
