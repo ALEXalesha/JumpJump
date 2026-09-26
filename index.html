@@ -114,7 +114,7 @@ const LEVELS = [
     L.pit(44, 50); L.mover(46, 9, 3, 'y', 3, 0.8);
     L.pit(70, 76); L.mover(72, 8, 3, 'x', 2);
     L.pit(96, 102); L.mover(98, 9, 3, 'y', 3, 1);
-    L.pit(120, 124); L.spikes(130, 131);
+    L.pit(120, 123); L.spikes(130, 131);
     L.coins(24, 5, 2); L.coins(46, 5, 3); L.coins(72, 6, 3); L.coins(98, 5, 3); L.coins(58, 8, 5); L.coins(112, 8, 4);
     L.blocks(34, 6, '?B?'); L.blocks(86, 6, 'B?');
     [16, 32, 38, 56, 62, 84, 90, 108, 114, 136].forEach((x) => L.beetle(x));
@@ -146,7 +146,7 @@ const WORLD_NAMES = { 1: 'Мир 1: Солнечная долина', 2: 'Мир
 
 // ================= Состояние =================
 const state = { phase: 'play', mode: 'demo', levelIdx: 0, lives: 3, coins: 0, score: 0, timer: 0, frame: 0, dyingT: 0, clearT: 0, respawn: null, banner: null, shake: 0, hurtInLevel: false, bossHitTaken: false };
-const player = { x: 0, y: 0, w: 22, h: 30, vx: 0, vy: 0, onGround: false, facing: 1, coyote: 0, buffer: 0, walk: 0, standOn: null, invuln: 0 };
+const player = { x: 0, y: 0, w: 22, h: 30, vx: 0, vy: 0, onGround: false, facing: 1, coyote: 0, buffer: 0, walk: 0, standOn: null, invuln: 0, boost: false };
 let level = null, camX = 0, boss = null, lockCam = null;
 const pops = [], particles = [], rocks = [];
 let jumpWasDown = false, autopilot = false;
@@ -197,6 +197,7 @@ function placePlayer(x) {
   let top = 10;
   while (top > 0 && solid(Math.floor((x + 11) / TILE), top - 1)) top--;
   Object.assign(player, { x, y: top * TILE - player.h, vx: 0, vy: 0, onGround: true, facing: 1, coyote: 0, buffer: 0, standOn: null, invuln: 60 });
+  Object.assign(pilotPlan, { hold: 0, air: false, back: 0, bestX: x, stuck: 0 });
   camX = Math.max(0, Math.min(x - W / 3, level.w * TILE - W));
 }
 function startLevel(i) {
@@ -317,7 +318,9 @@ function update() {
   jumpWasDown = jumpDown;
   if (player.onGround) player.coyote = COYOTE; else if (player.coyote > 0) player.coyote--;
   if (player.buffer > 0) { player.buffer--; if (player.coyote > 0) { player.vy = JUMP_V; player.coyote = 0; player.buffer = 0; player.onGround = false; player.standOn = null; if (state.mode !== 'demo') SFX.jump(); } }
-  if (!jumpDown && player.vy < JUMP_CUT) player.vy = JUMP_CUT;
+  // короткий прыжок, если кнопку отпустили; подброс пружины и отскок от босса не срезаются
+  if (player.vy >= 0) player.boost = false;
+  if (!jumpDown && !player.boost && player.vy < JUMP_CUT) player.vy = JUMP_CUT;
 
   player.vy = Math.min(player.vy + GRAV, MAXFALL);
   player.onGround = false;
@@ -336,7 +339,7 @@ function update() {
   // пружины
   for (const s of level.springs) {
     if (s.squash > 0) s.squash--;
-    if (player.vy >= 0 && overlap(player, s) && prevBottom <= s.y + 8) { player.y = s.y - player.h; player.vy = SPRING_V; s.squash = 12; player.onGround = false; if (state.mode !== 'demo') SFX.spring(); }
+    if (player.vy >= 0 && overlap(player, s) && prevBottom <= s.y + 8) { player.y = s.y - player.h; player.vy = SPRING_V; player.boost = true; s.squash = 12; player.onGround = false; if (state.mode !== 'demo') SFX.spring(); }
   }
   if (player.x + player.w > level.w * TILE) player.x = level.w * TILE - player.w;
   if (player.vx !== 0 && player.onGround) player.walk += Math.abs(player.vx) * 0.12;
@@ -386,15 +389,125 @@ function update() {
   camX = Math.max(lo, Math.min(camX, Math.max(lo, hi)));
 }
 
+// Заставка меню и проверки: перед каждым решением пилот «проигрывает в уме» несколько вариантов
+// (идти, прыгнуть коротко/высоко, шагом/бегом) по тем же правилам движения, что и герой, с
+// платформами, пружинами, шипами, врагами и боссом, и выбирает безопасный вариант, дальше всех ведущий вправо.
+const pilotPlan = { hold: 0, dir: 1, run: false, air: false, back: 0, bestX: 0, stuck: 0 };
+function moverAt(m, t) {
+  const off = Math.sin(t * 0.02 * m.speed) * m.range / 2 + m.range / 2;
+  return m.axis === 'x' ? { x: m.bx + off, y: m.by } : { x: m.bx, y: m.by - off };
+}
+function simulate(hold, run, dir, frames) {
+  const o = { x: player.x, y: player.y, w: player.w, h: player.h, vx: player.vx, vy: player.vy, onGround: player.onGround };
+  let on = player.standOn, boost = player.boost, air = false, stompBoss = false, landK = 0, landX = 0;
+  const max = run ? RUN : WALK, dead = new Set(), eh = 3;
+  const b = boss, rk = rocks.map((r) => ({ x: r.x, y: r.y, vx: r.vx, vy: r.vy }));
+  const bossPhaseAt = (k) => {
+    if (!b || b.kind !== 'golem') return 'any';
+    if (k < b.phaseT) return b.phase;
+    return b.phase === 'rest' ? 'walk' : b.phase === 'walk' ? 'throw' : 'rest';
+  };
+  for (let k = 1; k <= frames; k++) {
+    const pos = level.movers.map((m) => moverAt(m, m.t + k));
+    if (on) { const i = level.movers.indexOf(on), p0 = moverAt(on, on.t + k - 1); o.x += pos[i].x - p0.x; o.y += pos[i].y - p0.y; }
+    if (dir > 0) o.vx = Math.min(o.vx + ACC, max); else if (dir < 0) o.vx = Math.max(o.vx - ACC, -max);
+    else { o.vx *= FRICTION; if (Math.abs(o.vx) < 0.1) o.vx = 0; }
+    const jd = k <= hold;
+    if (k === 1 && hold > 0 && (o.onGround || on || player.coyote > 0)) { o.vy = JUMP_V; on = null; boost = false; }
+    if (o.vy >= 0) boost = false;
+    if (!jd && !boost && o.vy < JUMP_CUT) o.vy = JUMP_CUT;
+    o.vy = Math.min(o.vy + GRAV, MAXFALL); o.onGround = false;
+    moveAxis(o, 'x');
+    if (lockCam) o.x = Math.max(lockCam.a + 2, Math.min(o.x, lockCam.b - o.w - 2));
+    const pb = o.y + o.h;
+    moveAxis(o, 'y');
+    on = null;
+    if (o.vy >= 0) for (let i = 0; i < level.movers.length; i++) {
+      const m = level.movers[i], p = pos[i], dy = p.y - moverAt(m, m.t + k - 1).y;
+      if (o.x + o.w > p.x + 2 && o.x < p.x + m.w - 2 && pb <= p.y + Math.max(2, dy + 2) && o.y + o.h >= p.y) { o.y = p.y - o.h; o.vy = 0; o.onGround = true; on = m; break; }
+    }
+    for (const s of level.springs) if (o.vy >= 0 && overlap(o, s) && pb <= s.y + 8) { o.y = s.y - o.h; o.vy = SPRING_V; boost = true; }
+    if (o.y > H) return { dead: true };
+    if (level.spikes.some((s) => overlap(o, s))) return { dead: true };
+    for (const e of level.enemies) {
+      if (!e.alive || dead.has(e)) continue;
+      const ex = e.x + (e.active || e.x < player.x + W ? e.vx * k : 0);
+      const ey = e.fly ? e.base + Math.sin((state.frame + k) * 0.06 + e.home) * 18 : e.y;
+      const box = { x: ex - eh, y: ey - eh, w: e.w + eh * 2, h: e.h + eh };
+      if (!overlap(o, box)) continue;
+      // запас вокруг врага: сбоку - опасно; раздавить - только если уже сверху и касаемся по-настоящему
+      if (!(o.vy > 0 && pb <= ey + 6)) return { dead: true };
+      if (overlap(o, { x: ex, y: ey, w: e.w, h: e.h })) { dead.add(e); o.vy = jd ? JUMP_V * 0.9 : -7; }
+    }
+    if (b) {
+      const ph = bossPhaseAt(k), bx = b.x + ((b.kind === 'beetleKing' || ph === 'walk') ? b.vx * k : 0);
+      const box = { x: bx - 4, y: b.y - 2, w: b.w + 8, h: b.h + 2 };
+      if (overlap(o, box)) {
+        const vulnerable = b.kind === 'beetleKing' || ph === 'rest';
+        if (o.vy > 0 && pb - o.vy <= b.y + 10 && vulnerable && (b.inv === 0 || stompBoss)) { stompBoss = true; o.vy = -9; boost = true; } else if (!(o.vy > 0 && pb - o.vy <= b.y + 10)) return { dead: true };
+      }
+    }
+    for (const r of rk) {
+      r.vy += 0.35; r.x += r.vx; r.y += r.vy;
+      if (r.y < 10 * TILE - r.r && Math.hypot(r.x - (o.x + o.w / 2), r.y - (o.y + o.h / 2)) < r.r + 18) return { dead: true };
+    }
+    if (!o.onGround) air = true;
+    if (air && o.onGround && k > 2 && !landK) { landK = k; landX = o.x; frames = Math.min(frames, k + 16); dir = 0; hold = 0; }
+  }
+  if (landK) return { x: landX, k: landK, landed: true, stompBoss };
+  // в воздухе к концу прогона: под героем нет ни земли, ни платформы - это падение в яму
+  if (!o.onGround && o.vy > 0) {
+    const c0 = Math.floor(o.x / TILE), c1 = Math.floor((o.x + o.w) / TILE);
+    let floor = false;
+    for (let ty = Math.floor((o.y + o.h) / TILE); ty < ROWS && !floor; ty++) for (let tx = c0; tx <= c1; tx++) if (solid(tx, ty)) floor = true;
+    if (!floor && !level.movers.some((m) => o.x + o.w > m.bx - 8 && o.x < m.bx + m.w + (m.axis === 'x' ? m.range : 0) + 8)) return { dead: true };
+  }
+  return { x: o.x, k: frames, landed: o.onGround, stompBoss };
+}
 function pilot() {
-  // рука для заставки меню: вправо, прыжок у ямы, стены, шипов и врага
-  const px = player.x + player.w, row = Math.floor((player.y + player.h - 1) / TILE);
-  const tx = Math.floor((px + 12) / TILE);
-  const pitAhead = !solid(tx, row + 1) && !solid(tx + 1, row + 1);
-  const wall = solid(tx, row) || solid(tx, row - 1);
-  const foe = level.enemies.some((e) => e.alive && e.x > player.x && e.x - player.x < 70 && !e.fly);
-  const spike = level.spikes.some((s) => s.x > player.x && s.x - px < 20);
-  return { left: false, right: true, run: false, jumpDown: (player.onGround && (pitAhead || wall || foe || spike)) || (!player.onGround && player.vy < 0) };
+  const P = pilotPlan, grounded = player.onGround || !!player.standOn;
+  const out = (dir, jump, run) => ({ left: dir < 0, right: dir > 0, jumpDown: jump, run });
+  if (!grounded && P.air) { const j = P.hold > 0; P.hold--; return out(P.dir, j, P.run); }
+  P.air = false;
+  // застряли - отойти назад и попробовать снова (например, разбег к пружине)
+  if (player.x > P.bestX + 4) { P.bestX = player.x; P.stuck = 0; } else P.stuck++;
+  if (P.back > 0) { P.back--; return out(-1, false, false); }
+  if (P.stuck > 600 && !boss) { P.stuck = 0; P.back = 30; return out(-1, false, false); }
+
+  const jump = (hold, run, dir) => { P.hold = hold - 1; P.dir = dir; P.run = run; P.air = true; return out(dir, true, run); };
+  const cands = [];
+  for (const run of [false, true]) for (const hold of [22, 12, 6, 1]) for (const dir of boss ? [1, 0, -1] : [1]) {
+    const r = simulate(hold, run, dir, 120);
+    if (!r.dead && r.landed) cands.push({ hold, run, dir, r });
+  }
+  if (boss) {
+    // босс: давить сверху, когда можно; иначе держаться подальше и перепрыгивать
+    const hit = cands.filter((c) => c.r.stompBoss).sort((a, b) => a.r.k - b.r.k)[0];
+    if (hit) return jump(hit.hold, hit.run, hit.dir);
+    // держаться подальше: у голема камни падают чуть ближе того места, где стоял герой, - значит, отходить
+    const cx = player.x + player.w / 2, bx = boss.x + boss.w / 2, away = cx < bx ? -1 : 1, dist = Math.abs(cx - bx);
+    const wall = away < 0 ? cx - lockCam.a : lockCam.b - cx;
+    const danger = boss.kind === 'golem' ? boss.phase !== 'rest' || boss.phaseT < 20 : true;
+    if (danger && wall < 70 && dist < 200) {
+      // прижаты к стене - перепрыгнуть через босса
+      const over = cands.filter((c) => c.dir === -away && (away < 0 ? c.r.x > boss.x + boss.w : c.r.x + player.w < boss.x)).sort((a, b) => a.r.k - b.r.k)[0];
+      if (over) return jump(over.hold, over.run, over.dir);
+    }
+    const want = danger && (boss.kind === 'golem' || dist < 160) && wall > 40 ? away : boss.kind === 'golem' && !danger ? -away : 0;
+    for (const dir of [want, 0, -want]) if (!simulate(0, false, dir, 30).dead) return out(dir, false, dir !== 0 && boss.kind === 'golem');
+    const any = cands.sort((a, b) => b.r.k - a.r.k)[0];
+    return any ? jump(any.hold, any.run, any.dir) : out(away, false, false);
+  }
+  const walk = simulate(0, false, 1, 60);
+  if (!walk.dead && walk.x - player.x > 100) return out(1, false, false);
+  if (!walk.dead && walk.x - player.x < 20 && !cands.some((c) => c.r.x > player.x + 40)) { P.back = 40; return out(-1, false, false); }
+  const best = cands.filter((c) => c.r.x > player.x + 40).sort((a, b) => b.r.x - a.r.x)[0];
+  if (best) return jump(best.hold, best.run, best.dir);
+  if (!simulate(0, false, 1, 14).dead) return out(1, false, false);
+  if (!simulate(0, false, 0, 40).dead) return out(0, false, false);
+  const esc = cands.sort((a, b) => b.r.k - a.r.k)[0];
+  if (esc) return jump(esc.hold, esc.run, esc.dir);
+  return out(-1, false, false);
 }
 
 // ================= Боссы =================
@@ -434,11 +547,11 @@ function updateBoss() {
     const fromTop = player.vy > 0 && player.y + player.h - player.vy <= b.y + 10;
     const vulnerable = b.kind === 'beetleKing' || b.phase === 'rest';
     if (fromTop && vulnerable && b.inv === 0) {
-      b.hp--; b.inv = 50; player.vy = -9; SFX.stomp(); burst(b.x + b.w / 2, b.y, '#fff', 14);
+      b.hp--; b.inv = 50; player.y = b.y - player.h; player.vy = -9; player.boost = true; SFX.stomp(); burst(b.x + b.w / 2, b.y, '#fff', 14);
       if (b.kind === 'beetleKing') b.vx *= 1.25;
       if (b.hp <= 0) bossDefeated();
     } else if (fromTop && b.inv > 0) player.vy = -7;
-    else hurt();
+    else if (b.inv < 35) hurt();                          // сразу после удара - короткая передышка, чтобы не задело отскоком
   }
 }
 function updateRocks() {
@@ -839,6 +952,7 @@ window.__game = {
   state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, get camX() { return camX; },
   get progress() { return progress; }, get totals() { return totals; }, get autopilot() { return autopilot; },
   step(n = 1, draw = true) { for (let i = 0; i < n; i++) { update(); kit.endStep(); } if (draw) render(); },
+  setAutopilot(v) { autopilot = v; }, simulate,
   startLevel, startDemo, loadLevel, tileAt, setTile, hurt, starsFor, countGifts,
   addEnemy(px, py, kind = 'beetle') { const e = kind === 'bee' ? { kind, x: px, y: py, base: py, home: px, range: 64, w: 26, h: 20, vx: 0, vy: 0, fly: true, alive: true, squash: 0, active: true } : { kind, x: px, y: py, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: true }; level.enemies.push(e); return e; },
   clearEnemies() { level.enemies.length = 0; },
