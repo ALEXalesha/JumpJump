@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Прыг-скок: мини-платформер (фан-версия, не связана с правообладателем)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: linear-gradient(#2b3a67, #1a2340);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    font-family: Consolas, 'Courier New', monospace; color: #fff;
+    user-select: none; overflow: hidden;
+  }
+  h1 { font-size: 20px; letter-spacing: 3px; text-shadow: 2px 2px 0 #000; }
+  #hud { display: flex; gap: 24px; font-size: 14px; font-weight: bold; text-shadow: 2px 2px 0 #000; }
+  #hud b { color: #ffd23f; }
+  #wrap { position: relative; }
+  canvas { display: block; border: 3px solid #0d1226; image-rendering: pixelated; }
+  #info { font-size: 12px; color: #c8d0f0; text-align: center; line-height: 1.6; }
+  .note { color: #8890b0; font-size: 11px; }
+  #overlay {
+    position: absolute; inset: 0; background: rgba(10, 14, 30, 0.72);
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    text-align: center; font-size: 22px; text-shadow: 2px 2px 0 #000;
+  }
+  #overlay.show { display: flex; }
+  #overlay small { font-size: 14px; color: #cfd6f5; }
+  #overlay button {
+    padding: 10px 22px; background: #e8612c; color: #fff; border: 3px solid #fff;
+    font: bold 14px Consolas, 'Courier New', monospace; cursor: pointer;
+  }
+  #overlay button:hover { background: #ff7a45; }
+</style>
+</head>
+<body>
+  <h1>ПРЫГ-СКОК</h1>
+  <div id="hud">
+    <span>ОЧКИ <b id="score">000000</b></span>
+    <span>МОНЕТЫ <b id="coins">00</b></span>
+    <span>УРОВЕНЬ <b id="level">1</b></span>
+    <span>ЖИЗНИ <b id="lives">3</b></span>
+    <span>РЕКОРД <b id="best">0</b></span>
+  </div>
+  <div id="wrap">
+    <canvas id="game" width="640" height="384"></canvas>
+    <div id="overlay"><div id="msg"></div><small id="sub"></small><button id="againBtn" type="button">ИГРАТЬ</button></div>
+  </div>
+  <div id="info">
+    ← → / A D - ходить · Shift - бежать · ↑ / Пробел / W - прыжок (держи - выше) · P / Esc - пауза · R - заново · M - звук<br>
+    <span class="note">Фан-версия, не связана с правообладателем. Герой, жуки и блоки нарисованы в коде, звуки синтезированы.</span>
+  </div>
+
+<script>
+'use strict';
+// ---------- Поле ----------
+const TILE = 32, ROWS = 12, W = 640, H = ROWS * TILE;
+const STEP_MS = 1000 / 60;
+const GRAV = 0.55, MAXFALL = 11, JUMP_V = -11.2, JUMP_CUT = -4;
+const WALK = 3, RUN = 4.2, ACC = 0.45, FRICTION = 0.8;
+const COYOTE = 6, JUMP_BUFFER = 6;
+const START_LIVES = 3, BEST_KEY = 'jumper_best';
+const T = { EMPTY: 0, GROUND: 1, BRICK: 2, GIFT: 3, USED: 4, STONE: 5, PILLAR: 6, PILLAR_TOP: 7 };
+
+const params = new URLSearchParams(location.search);
+
+// ---------- Уровни: собираются кодом, а не строками - так видно, где яма и где лестница ----------
+function makeLevel(width, fill) {
+  const L = { w: width, t: new Uint8Array(width * ROWS), coins: [], enemies: [], flagX: 0, flagHit: 0, flagTop: 2 * TILE };
+  const set = (x, y, v) => { if (x >= 0 && x < width && y >= 0 && y < ROWS) L.t[y * width + x] = v; };
+  const api = {
+    ground(a, b) { for (let x = a; x <= b; x++) { set(x, 10, T.GROUND); set(x, 11, T.GROUND); } },
+    pit(a, b) { for (let x = a; x <= b; x++) { set(x, 10, T.EMPTY); set(x, 11, T.EMPTY); } },
+    blocks(x, y, s) { [...s].forEach((ch, i) => { const v = { B: T.BRICK, '?': T.GIFT, S: T.STONE }[ch]; if (v) set(x + i, y, v); }); },
+    coins(x, y, n) { for (let i = 0; i < n; i++) L.coins.push({ x: (x + i) * TILE + 8, y: y * TILE + 6, w: 16, h: 20, taken: false }); },
+    pillar(x, h) { for (let k = 0; k < h; k++) for (const dx of [0, 1]) set(x + dx, 9 - k, k === h - 1 ? T.PILLAR_TOP : T.PILLAR); },
+    stairsUp(x, h) { for (let i = 0; i < h; i++) for (let k = 0; k <= i; k++) set(x + i, 9 - k, T.STONE); },
+    stairsDown(x, h) { for (let i = 0; i < h; i++) for (let k = 0; k < h - i; k++) set(x + i, 9 - k, T.STONE); },
+    enemy(x) { L.enemies.push({ x: x * TILE + 2, y: 10 * TILE - 24, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: false }); },
+    flag(x) { L.flagX = x * TILE + 14; L.flagHit = x * TILE - 1; set(x, 9, T.STONE); },   // касание основания флага - финиш
+  };
+  fill(api);
+  return L;
+}
+
+const LEVELS = [
+  () => makeLevel(130, (L) => {
+    L.ground(0, 129);
+    L.pit(30, 32); L.pit(66, 69); L.pit(97, 99);
+    L.blocks(14, 6, '?'); L.blocks(19, 6, 'B?B?B'); L.blocks(72, 6, 'B?B'); L.blocks(86, 6, '??');
+    L.coins(11, 8, 3); L.coins(30, 7, 3); L.coins(66, 7, 4); L.coins(97, 7, 3);
+    L.pillar(37, 2); L.pillar(45, 3); L.pillar(54, 2);
+    [24, 41, 49, 58, 76, 79, 90].forEach(L.enemy);
+    L.stairsUp(106, 4); L.stairsDown(112, 3);
+    L.flag(122);
+  }),
+  () => makeLevel(140, (L) => {
+    L.ground(0, 139);
+    L.pit(20, 22); L.pit(40, 43); L.pit(71, 73); L.pit(101, 104);
+    L.blocks(41, 7, 'BB'); L.blocks(47, 6, 'B?B'); L.blocks(12, 6, 'B?B');
+    L.blocks(60, 6, '?B?'); L.blocks(88, 6, 'BB??BB');
+    L.coins(20, 7, 3); L.coins(41, 6, 2); L.coins(71, 7, 3); L.coins(101, 7, 4); L.coins(116, 8, 4);
+    L.pillar(28, 2); L.pillar(33, 3); L.pillar(80, 3);
+    L.stairsUp(64, 3); L.stairsDown(67, 3);
+    [16, 26, 36, 52, 55, 62, 78, 85, 93, 96, 110, 118].forEach(L.enemy);
+    L.stairsUp(122, 5);
+    L.flag(133);
+  }),
+];
+
+// ---------- Хранилище ----------
+function loadBest() { try { return parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) { return 0; } }
+function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) { /* нет хранилища */ } }
+
+// ---------- Звук (WebAudio, без файлов) ----------
+let audio = null, muted = false;
+function beep(freq, dur, type = 'square', vol = 0.08, slide) {
+  if (muted) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur);
+  } catch (e) { /* звук недоступен */ }
+}
+function seq(notes) { notes.forEach(([f, d], i) => setTimeout(() => beep(f, d), i * 110)); }
+const SFX = {
+  jump: () => beep(420, 0.14, 'square', 0.06, 820),
+  coin: () => { beep(900, 0.05); setTimeout(() => beep(1350, 0.14), 50); },
+  bump: () => beep(160, 0.08, 'square', 0.1, 90),
+  stomp: () => beep(260, 0.1, 'triangle', 0.12, 80),
+  die: () => seq([[400, 0.12], [330, 0.12], [220, 0.3]]),
+  clear: () => seq([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.25]]),
+};
+
+// ---------- Состояние ----------
+const state = { phase: 'ready', levelIdx: 0, score: 0, coins: 0, lives: START_LIVES, best: loadBest(), timer: 0, frame: 0 };
+const player = { x: 0, y: 0, w: 22, h: 30, vx: 0, vy: 0, onGround: false, facing: 1, coyote: 0, buffer: 0, walk: 0 };
+let level = null;
+let camX = 0;
+const pops = [];
+const keys = {};
+let jumpWasDown = false;
+
+function tileAt(tx, ty) {
+  if (tx < 0) return T.STONE;            // левый край уровня - стена
+  if (tx >= level.w || ty < 0 || ty >= ROWS) return T.EMPTY;
+  return level.t[ty * level.w + tx];
+}
+function setTile(tx, ty, v) { level.t[ty * level.w + tx] = v; }
+const solid = (tx, ty) => tileAt(tx, ty) !== T.EMPTY;
+
+function loadLevel(i) {
+  state.levelIdx = i;
+  level = LEVELS[i]();
+  pops.length = 0;
+  player.x = 64; player.y = 10 * TILE - player.h;
+  player.vx = 0; player.vy = 0; player.onGround = true; player.facing = 1; player.coyote = 0; player.buffer = 0;
+  camX = 0;
+}
+
+function newGame() {
+  state.score = 0; state.coins = 0; state.lives = START_LIVES; state.frame = 0;
+  loadLevel(0);
+  state.phase = 'play';
+  hideOverlay();
+}
+
+// ---------- Движение с учётом клеток ----------
+// Сдвиг по одной оси и выталкивание из твёрдых клеток. Возвращает клетку, в которую упёрлись.
+function moveAxis(o, axis) {
+  if (axis === 'x') {
+    o.x += o.vx;
+    const top = Math.floor(o.y / TILE), bot = Math.floor((o.y + o.h - 0.001) / TILE);
+    if (o.vx > 0) {
+      const tx = Math.floor((o.x + o.w - 0.001) / TILE);
+      for (let ty = top; ty <= bot; ty++) if (solid(tx, ty)) { o.x = tx * TILE - o.w; o.vx = 0; return { tx, ty }; }
+    } else if (o.vx < 0) {
+      const tx = Math.floor(o.x / TILE);
+      for (let ty = top; ty <= bot; ty++) if (solid(tx, ty)) { o.x = (tx + 1) * TILE; o.vx = 0; return { tx, ty }; }
+    }
+  } else {
+    o.y += o.vy;
+    const left = Math.floor(o.x / TILE), right = Math.floor((o.x + o.w - 0.001) / TILE);
+    if (o.vy > 0) {
+      const ty = Math.floor((o.y + o.h - 0.001) / TILE);
+      for (let tx = left; tx <= right; tx++) if (solid(tx, ty)) { o.y = ty * TILE - o.h; o.vy = 0; o.onGround = true; return { tx, ty }; }
+    } else if (o.vy < 0) {
+      const ty = Math.floor(o.y / TILE);
+      // Удар головой: берём клетку ближе к центру героя.
+      const cx = Math.floor((o.x + o.w / 2) / TILE);
+      const order = [cx, left, right];
+      for (const tx of order) if (solid(tx, ty)) { o.y = (ty + 1) * TILE; o.vy = 0; return { tx, ty }; }
+    }
+  }
+  return null;
+}
+
+function bumpBlock(tx, ty) {
+  const t = tileAt(tx, ty);
+  if (t === T.GIFT) {
+    setTile(tx, ty, T.USED);
+    state.coins++; state.score += 200;
+    pops.push({ x: tx * TILE + TILE / 2, y: ty * TILE - 8, vy: -6, life: 30 });
+    SFX.coin();
+  } else {
+    SFX.bump();
+  }
+  // Жук, стоящий на ударенном блоке, погибает.
+  for (const e of level.enemies) {
+    if (e.alive && Math.abs(e.x + e.w / 2 - (tx * TILE + TILE / 2)) < TILE && Math.abs(e.y + e.h - ty * TILE) < 4) killEnemy(e, 100);
+  }
+}
+
+function killEnemy(e, pts) {
+  e.alive = false; e.squash = 30;
+  state.score += pts;
+  SFX.stomp();
+}
+
+function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+function loseLife() {
+  if (state.phase !== 'play') return;
+  state.phase = 'dying';
+  state.timer = 70;
+  player.vy = -9; player.vx = 0;
+  SFX.die();
+}
+
+function update() {
+  state.frame++;
+  if (state.phase === 'dying') {
+    player.vy = Math.min(player.vy + GRAV, MAXFALL);
+    player.y += player.vy;
+    if (--state.timer <= 0) {
+      state.lives--;
+      if (state.lives <= 0) finish('over');
+      else { loadLevel(state.levelIdx); state.phase = 'play'; }
+    }
+    return;
+  }
+  if (state.phase === 'clear') {
+    if (--state.timer <= 0) {
+      if (state.levelIdx + 1 < LEVELS.length) { loadLevel(state.levelIdx + 1); state.phase = 'play'; }
+      else finish('won');
+    }
+    return;
+  }
+  if (state.phase !== 'play') return;
+
+  // Управление
+  const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
+  const jumpDown = !!(keys.ArrowUp || keys.Space || keys.KeyW);
+  const max = (keys.ShiftLeft || keys.ShiftRight) ? RUN : WALK;
+  if (left && !right) { player.vx = Math.max(player.vx - ACC, -max); player.facing = -1; }
+  else if (right && !left) { player.vx = Math.min(player.vx + ACC, max); player.facing = 1; }
+  else { player.vx *= FRICTION; if (Math.abs(player.vx) < 0.1) player.vx = 0; }
+
+  if (jumpDown && !jumpWasDown) player.buffer = JUMP_BUFFER;   // нажатие чуть раньше приземления не теряется
+  jumpWasDown = jumpDown;
+  if (player.onGround) player.coyote = COYOTE; else if (player.coyote > 0) player.coyote--;
+  if (player.buffer > 0) {
+    player.buffer--;
+    if (player.coyote > 0) { player.vy = JUMP_V; player.coyote = 0; player.buffer = 0; player.onGround = false; SFX.jump(); }
+  }
+  if (!jumpDown && player.vy < JUMP_CUT) player.vy = JUMP_CUT;   // отпустил - прыжок ниже
+
+  player.vy = Math.min(player.vy + GRAV, MAXFALL);
+  player.onGround = false;
+  moveAxis(player, 'x');
+  const prevBottom = player.y + player.h;
+  const hitY = moveAxis(player, 'y');
+  if (hitY && player.vy === 0 && !player.onGround) bumpBlock(hitY.tx, hitY.ty);
+  if (player.x + player.w > level.w * TILE) player.x = level.w * TILE - player.w;
+
+  if (player.vx !== 0 && player.onGround) player.walk += Math.abs(player.vx) * 0.12;
+
+  if (player.y > H + 40) { loseLife(); return; }   // упал в яму
+
+  // Жуки: включаются, когда подходят к экрану; падают, разворачиваются у стен и краёв.
+  for (const e of level.enemies) {
+    if (!e.alive) { if (e.squash > 0) e.squash--; continue; }
+    if (!e.active) { if (e.x < camX + W + 32) e.active = true; else continue; }
+    e.vy = Math.min(e.vy + GRAV, MAXFALL);
+    const vx = e.vx;
+    e.onGround = false;
+    if (moveAxis(e, 'x')) e.vx = -vx;
+    moveAxis(e, 'y');
+    if (e.onGround) {
+      const aheadX = e.vx < 0 ? e.x - 1 : e.x + e.w + 1;
+      const below = Math.floor((e.y + e.h + 1) / TILE);
+      if (!solid(Math.floor(aheadX / TILE), below)) e.vx = -e.vx;   // край - назад
+    }
+    if (e.y > H + 40) { e.alive = false; continue; }
+    if (overlap(player, e)) {
+      if (player.vy > 0 && prevBottom <= e.y + 8) {
+        killEnemy(e, 100);
+        player.vy = (jumpDown ? JUMP_V * 0.9 : -7);
+      } else {
+        loseLife();
+        return;
+      }
+    }
+  }
+
+  for (const c of level.coins) {
+    if (!c.taken && overlap(player, c)) { c.taken = true; state.coins++; state.score += 100; SFX.coin(); }
+  }
+  for (let i = pops.length - 1; i >= 0; i--) {
+    const p = pops[i]; p.y += p.vy; p.vy += 0.4; if (--p.life <= 0) pops.splice(i, 1);
+  }
+
+  // Флаг
+  if (player.x + player.w >= level.flagHit) {
+    const bonus = Math.max(100, Math.round((1 - (player.y - level.flagTop) / (10 * TILE - level.flagTop)) * 2000 / 100) * 100);
+    state.score += bonus;
+    state.phase = 'clear';
+    state.timer = 100;
+    SFX.clear();
+  }
+
+  // Камера ведёт героя, но не выходит за уровень
+  const target = player.x - W / 3;
+  camX += (target - camX) * 0.15;
+  camX = Math.max(0, Math.min(camX, level.w * TILE - W));
+}
+
+function finish(kind) {
+  state.phase = kind;
+  if (state.score > state.best) { state.best = state.score; saveBest(state.best); }
+  showOverlay(kind === 'won' ? 'ПОБЕДА!' : 'ИГРА ОКОНЧЕНА',
+    'Очки: ' + state.score + ' · рекорд: ' + state.best + ' · Enter или R - ещё раз', 'ИГРАТЬ СНОВА');
+}
+
+function togglePause() {
+  if (state.phase === 'play') { state.phase = 'paused'; showOverlay('ПАУЗА', 'P или Esc - продолжить', 'ПРОДОЛЖИТЬ'); }
+  else if (state.phase === 'paused') { state.phase = 'play'; hideOverlay(); }
+}
+
+// ---------- Экран поверх холста ----------
+const overlay = document.getElementById('overlay');
+const againBtn = document.getElementById('againBtn');
+function showOverlay(msg, sub, btn) {
+  document.getElementById('msg').textContent = msg;
+  document.getElementById('sub').textContent = sub;
+  againBtn.textContent = btn;
+  overlay.classList.add('show');
+}
+function hideOverlay() { overlay.classList.remove('show'); }
+againBtn.addEventListener('click', () => {
+  if (state.phase === 'paused') togglePause(); else newGame();
+});
+
+// ---------- Рисование ----------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas() {
+  const maxW = Math.min(window.innerWidth - 32, (window.innerHeight - 130) * W / H, 1280);
+  const cssW = Math.max(320, Math.floor(maxW));
+  const cssH = Math.round(cssW * H / W);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
+  canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+
+function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#7ec8f0'); g.addColorStop(1, '#d8f0ff');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const p1 = camX * 0.2, p2 = camX * 0.5;
+  for (let i = -1; i < 8; i++) {           // облака
+    const x = ((i * 260 - p1) % 2080 + 2080) % 2080 - 200, y = 30 + (i * 37) % 60;
+    rect(x + 10, y, 50, 14, '#fff'); rect(x, y + 10, 72, 14, '#fff'); rect(x + 24, y - 8, 22, 10, '#fff');
+  }
+  for (let i = -1; i < 10; i++) {          // дальние холмы
+    const x = i * 240 - (p2 % 240);
+    ctx.fillStyle = '#9fd18b';
+    ctx.beginPath(); ctx.moveTo(x, 320); ctx.quadraticCurveTo(x + 120, 190 + (i % 3) * 20, x + 240, 320); ctx.fill();
+  }
+}
+
+function drawTile(t, sx, sy) {
+  switch (t) {
+    case T.GROUND:
+      rect(sx, sy, TILE + 1, TILE, '#8a5a34');   // +1: без щелей между клетками при масштабе
+      rect(sx + 4, sy + 12, 6, 4, '#6e4526'); rect(sx + 18, sy + 22, 8, 4, '#6e4526');
+      if (tileAt(Math.floor((sx + camX) / TILE), Math.floor(sy / TILE) - 1) === T.EMPTY) {
+        rect(sx, sy, TILE + 1, 7, '#4caf50'); rect(sx, sy + 7, TILE + 1, 2, '#2e7d32');
+      }
+      break;
+    case T.BRICK:
+      rect(sx, sy, TILE, TILE, '#b5533c');
+      rect(sx, sy + 15, TILE, 2, '#6d2c1f'); rect(sx, sy + 30, TILE, 2, '#6d2c1f');
+      rect(sx + 15, sy, 2, 15, '#6d2c1f'); rect(sx + 6, sy + 17, 2, 13, '#6d2c1f'); rect(sx + 24, sy + 17, 2, 13, '#6d2c1f');
+      break;
+    case T.GIFT: {
+      const glow = Math.floor(state.frame / 12) % 3 === 0 ? '#ffe27a' : '#f4c430';
+      rect(sx, sy, TILE, TILE, '#7a4a12'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, glow);
+      ctx.fillStyle = '#fff';                 // звезда
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 4 : 10;
+        ctx.lineTo(sx + 16 + Math.cos(a) * r, sy + 16 + Math.sin(a) * r);
+      }
+      ctx.fill();
+      break;
+    }
+    case T.USED:
+      rect(sx, sy, TILE, TILE, '#5a4632'); rect(sx + 3, sy + 3, TILE - 6, TILE - 6, '#8c7358');
+      break;
+    case T.STONE:
+      rect(sx, sy, TILE, TILE, '#7d8391'); rect(sx + 2, sy + 2, TILE - 4, TILE - 4, '#9aa1b0');
+      rect(sx + 2, sy + TILE - 5, TILE - 4, 3, '#6a707c');
+      break;
+    case T.PILLAR:
+      rect(sx, sy, TILE, TILE, '#8e8a80'); rect(sx + 4, sy, 4, TILE, '#b9b5aa'); rect(sx + TILE - 6, sy, 4, TILE, '#6d695f');
+      break;
+    case T.PILLAR_TOP:
+      rect(sx - 2, sy, TILE + 4, 10, '#b9b5aa'); rect(sx, sy + 10, TILE, TILE - 10, '#8e8a80');
+      rect(sx + 4, sy + 10, 4, TILE - 10, '#b9b5aa');
+      break;
+  }
+}
+
+function drawHero() {
+  const sx = Math.floor(player.x - camX), sy = Math.floor(player.y);
+  ctx.save();
+  if (player.facing < 0) { ctx.translate(sx + player.w, sy); ctx.scale(-1, 1); } else ctx.translate(sx, sy);
+  const step = player.onGround && Math.abs(player.vx) > 0.2 ? Math.floor(player.walk) % 2 : 0;
+  rect(2, 0, 18, 12, '#1f9e8f');                 // капюшон
+  rect(5, 3, 14, 9, '#ffe0c2');                  // лицо
+  rect(13, 5, 3, 4, '#1b1b2f');                  // глаз
+  rect(8, 10, 8, 1, '#c77b5a');                  // улыбка
+  rect(2, 12, 18, 11, '#1f9e8f');                // куртка
+  rect(4, 14, 14, 3, '#ffd23f');                 // шарф
+  rect(19, 15, 3, 6, '#ffe0c2');                 // рука
+  if (!player.onGround) { rect(2, 23, 7, 5, '#34406b'); rect(13, 21, 7, 5, '#34406b'); rect(1, 27, 8, 3, '#e8612c'); rect(13, 25, 9, 3, '#e8612c'); }
+  else if (step) { rect(1, 23, 7, 4, '#34406b'); rect(14, 23, 7, 4, '#34406b'); rect(0, 27, 8, 3, '#e8612c'); rect(15, 27, 8, 3, '#e8612c'); }
+  else { rect(4, 23, 6, 4, '#34406b'); rect(12, 23, 6, 4, '#34406b'); rect(3, 27, 8, 3, '#e8612c'); rect(12, 27, 8, 3, '#e8612c'); }
+  ctx.restore();
+}
+
+function drawBeetle(e) {
+  const sx = Math.floor(e.x - camX), sy = Math.floor(e.y);
+  if (!e.alive) {
+    if (e.squash <= 0) return;
+    rect(sx + 2, sy + e.h - 8, e.w - 4, 8, '#6a3fa0'); rect(sx + 6, sy + e.h - 6, 4, 2, '#fff');
+    return;
+  }
+  const legs = Math.floor(state.frame / 8) % 2;
+  ctx.fillStyle = '#6a3fa0';
+  ctx.beginPath(); ctx.ellipse(sx + e.w / 2, sy + 14, e.w / 2, 13, 0, Math.PI, 0); ctx.fill();
+  rect(sx, sy + 13, e.w, 5, '#4b2a78');
+  rect(sx + 7, sy + 5, 4, 4, '#c9a8ff'); rect(sx + 17, sy + 8, 4, 4, '#c9a8ff');
+  const hx = e.vx < 0 ? sx - 2 : sx + e.w - 6;
+  rect(hx, sy + 10, 8, 8, '#2d1a4a'); rect(hx + (e.vx < 0 ? 1 : 4), sy + 12, 3, 3, '#fff');
+  rect(sx + 3 + legs * 2, sy + 18, 3, 6, '#2d1a4a'); rect(sx + 12 - legs * 2, sy + 18, 3, 6, '#2d1a4a'); rect(sx + 21 + legs * 2, sy + 18, 3, 6, '#2d1a4a');
+}
+
+function drawCoin(c) {
+  if (c.taken) return;
+  const sx = Math.floor(c.x - camX), ph = Math.floor(state.frame / 8) % 4;
+  const w = [12, 8, 3, 8][ph];
+  rect(sx + 8 - w / 2, c.y + 2, w, 16, '#ffd23f');
+  if (w > 4) rect(sx + 8 - w / 2 + 2, c.y + 5, Math.max(1, w - 6), 10, '#e8a317');
+}
+
+function drawFlag() {
+  const sx = Math.floor(level.flagX - camX);
+  rect(sx, level.flagTop, 4, 10 * TILE - level.flagTop - TILE, '#e8e8e8');
+  rect(sx - 3, level.flagTop - 8, 10, 10, '#ffd23f');
+  ctx.fillStyle = '#e8612c';
+  ctx.beginPath(); ctx.moveTo(sx + 4, level.flagTop + 6); ctx.lineTo(sx + 40, level.flagTop + 20); ctx.lineTo(sx + 4, level.flagTop + 34); ctx.fill();
+}
+
+function render() {
+  drawBackground();
+  const x0 = Math.floor(camX / TILE), x1 = Math.min(level.w - 1, x0 + Math.ceil(W / TILE) + 1);
+  for (let ty = 0; ty < ROWS; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const t = level.t[ty * level.w + tx];
+    if (t) drawTile(t, Math.floor(tx * TILE - camX), ty * TILE);
+  }
+  drawFlag();
+  for (const c of level.coins) drawCoin(c);
+  for (const e of level.enemies) drawBeetle(e);
+  for (const p of pops) rect(Math.floor(p.x - camX) - 5, p.y, 10, 14, '#ffd23f');
+  if (state.phase !== 'ready') drawHero();
+  if (state.phase === 'clear') {
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px Consolas, monospace'; ctx.textAlign = 'center';
+    ctx.fillText(state.levelIdx + 1 < LEVELS.length ? 'УРОВЕНЬ ПРОЙДЕН!' : 'ФИНИШ!', W / 2, 120);
+    ctx.textAlign = 'left';
+  }
+  if (muted) { ctx.fillStyle = '#1b1b2f'; ctx.font = '12px Consolas, monospace'; ctx.fillText('звук выкл (M)', 8, 16); }
+}
+
+let hudCache = '';
+function updateHud() {
+  const s = [state.score, state.coins, state.levelIdx, state.lives, state.best].join('|');
+  if (s === hudCache) return;
+  hudCache = s;
+  document.getElementById('score').textContent = String(state.score).padStart(6, '0');
+  document.getElementById('coins').textContent = String(state.coins).padStart(2, '0');
+  document.getElementById('level').textContent = state.levelIdx + 1;
+  document.getElementById('lives').textContent = Math.max(0, state.lives);
+  document.getElementById('best').textContent = Math.max(state.best, state.score);
+}
+
+// ---------- Ввод ----------
+addEventListener('keydown', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  if (e.code === 'KeyM') { muted = !muted; return; }
+  if (e.code === 'KeyP' || e.code === 'Escape') { togglePause(); return; }
+  if (['ready', 'over', 'won'].includes(state.phase)) {
+    if (e.code === 'Enter' || e.code === 'KeyR' || (state.phase === 'ready' && e.code === 'Space')) { e.preventDefault(); newGame(); }
+    return;
+  }
+  if (e.code === 'KeyR') { newGame(); return; }
+  keys[e.code] = true;
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false;
+  if (state.phase === 'play') togglePause();
+});
+addEventListener('resize', fitCanvas);
+
+// ---------- Цикл: физика фиксированными шагами ----------
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(now - last, 250);
+  last = now;
+  while (acc >= STEP_MS) { update(); acc -= STEP_MS; }
+  render();
+  updateHud();
+  requestAnimationFrame(loop);
+}
+
+loadLevel(0);
+fitCanvas();
+showOverlay('ПРЫГ-СКОК', 'Дойди до флага на двух уровнях. Прыгай на жуков сверху. Enter или Пробел - старт', 'ИГРАТЬ');
+requestAnimationFrame(loop);
+
+// ---------- Крючок для проверок ----------
+window.__game = {
+  ready: true,
+  state, player, keys, T, TILE,
+  get level() { return level; },
+  get camX() { return camX; },
+  step(n = 1) { for (let i = 0; i < n; i++) update(); render(); updateHud(); },
+  newGame, loadLevel, tileAt, setTile,
+  // Поставить жука в клетку (tx, ty - клетка, на которой он стоит сверху).
+  addEnemy(px, py) { const e = { x: px, y: py, w: 28, h: 24, vx: -1, vy: 0, alive: true, squash: 0, active: true }; level.enemies.push(e); return e; },
+  clearEnemies() { level.enemies.length = 0; },
+};
+</script>
+</body>
+</html>
