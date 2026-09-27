@@ -2,7 +2,7 @@
 // переназначение клавиш, геймпад, музыка и звуки (синтез WebAudio), достижения,
 // пауза при скрытии вкладки, счётчик кадров, всплывающие сообщения.
 // Один и тот же файл лежит в папке каждой игры (страницы самостоятельные), копии одинаковые -
-// это проверяет tests/web/_kit.spec.js. Игра подключает его обычным <script src="kit.js">.
+// это проверяет tests/web/kit.spec.js. Игра подключает его обычным <script src="kit.js">.
 'use strict';
 (function () {
   const DEFAULT_SETTINGS = { musicVol: 0.5, sfxVol: 0.8, difficulty: 'normal', effects: true, shake: true, showFps: false, lang: 'ru' };
@@ -96,6 +96,54 @@
     }
   }
 
+  // ---------- Безопасная загрузка: данные из хранилища приводятся к схеме ----------
+  // Узлы схемы: S.int(по умолчанию, мин, макс), S.num(...), S.bool(...), S.str(..., [допустимые]),
+  // S.obj({поле: узел}), S.map(узел значения, [допустимые ключи]), S.arr(узел, макс. длина, по умолчанию), S.nul(узел).
+  // Всё, что не подходит, заменяется значением по умолчанию: игра не падает на испорченном хранилище.
+  const S = {
+    int: (def, min = -Infinity, max = Infinity) => ({ t: 'int', def, min, max }),
+    num: (def, min = -Infinity, max = Infinity) => ({ t: 'num', def, min, max }),
+    bool: (def) => ({ t: 'bool', def }),
+    str: (def, allowed) => ({ t: 'str', def, allowed }),
+    obj: (fields) => ({ t: 'obj', fields }),
+    map: (val, keys) => ({ t: 'map', val, keys }),
+    arr: (item, max = 1000, def = []) => ({ t: 'arr', item, max, def }),
+    nul: (node) => ({ t: 'nul', node }),
+  };
+  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  function valid(v, n) {
+    switch (n.t) {
+      case 'int': case 'num': return typeof v === 'number' && Number.isFinite(v) && v >= n.min && v <= n.max;
+      case 'bool': return typeof v === 'boolean';
+      case 'str': return typeof v === 'string' && (!n.allowed || n.allowed.includes(v));
+      case 'obj': case 'map': return isObj(v);
+      case 'arr': return Array.isArray(v);
+      default: return v !== undefined && v !== null;
+    }
+  }
+  function fit(v, n) {
+    switch (n.t) {
+      case 'int': return typeof v === 'number' && Number.isFinite(v) ? Math.min(n.max, Math.max(n.min, Math.round(v))) : n.def;
+      case 'num': return typeof v === 'number' && Number.isFinite(v) ? Math.min(n.max, Math.max(n.min, v)) : n.def;
+      case 'bool': return typeof v === 'boolean' ? v : n.def;
+      case 'str': return typeof v === 'string' && (!n.allowed || n.allowed.includes(v)) ? v : n.def;
+      case 'nul': return v === null || v === undefined ? null : fit(v, n.node);
+      case 'arr': return Array.isArray(v) ? v.slice(0, n.max).map((x) => fit(x, n.item)) : n.def.slice();
+      case 'map': {
+        const o = {};
+        // Простые значения неверного вида выбрасываются (а не заменяются нулём): в словаре рекордов не появится «0:00»
+        if (isObj(v)) for (const k in v) if (!n.keys || n.keys.includes(k)) { if (!valid(v[k], n.val)) continue; const x = fit(v[k], n.val); if (x !== undefined && x !== null) o[k] = x; }
+        return o;
+      }
+      case 'obj': {
+        const o = {}, src = isObj(v) ? v : {};
+        for (const k in n.fields) o[k] = fit(src[k], n.fields[k]);
+        return o;
+      }
+      default: return v;
+    }
+  }
+
   // ---------- Сам каркас ----------
   class Kit {
     constructor(o) {
@@ -104,14 +152,17 @@
       this.game = o.game || {};
       this.mode = 'menu';            // menu | play | paused
       this.stack = [];
-      const extra = {};
-      for (const x of o.extraSettings || []) extra[x.name] = x.default;
-      this.settings = Object.assign({}, DEFAULT_SETTINGS, extra, o.settings || {}, this.load('settings', {}));
+      this.settings = this.loadSettings();
       this.actions = o.actions || {};
       this.bindings = this.defaultBindings();
       const savedB = this.load('bindings', null);
-      if (savedB) for (const a in savedB) if (this.bindings[a]) this.bindings[a] = savedB[a].slice(0, 2);
-      this.unlocked = this.load('achievements', {});
+      const code = (c) => c === null || (typeof c === 'string' && c.length > 0 && c.length < 40);
+      // Сохранённые клавиши берутся, только если это пара строк (или пустых ячеек) и хотя бы одна клавиша есть
+      if (isObj(savedB)) for (const a in savedB) {
+        const v = savedB[a];
+        if (this.bindings[a] && Array.isArray(v) && v.length >= 1 && v.length <= 2 && v.every(code) && v.some(Boolean)) this.bindings[a] = [v[0], v.length > 1 ? v[1] : null];
+      }
+      this.unlocked = fit(this.load('achievements', {}), S.map(S.num(0, 0)));
       this.held = new Set();
       this.pressed = new Set();
       this.padDown = new Set();
@@ -125,6 +176,24 @@
       requestAnimationFrame((t) => this.loop(t));
       this.applySettings();
     }
+
+    settingsSchema() {
+      const f = {
+        musicVol: S.num(DEFAULT_SETTINGS.musicVol, 0, 1), sfxVol: S.num(DEFAULT_SETTINGS.sfxVol, 0, 1),
+        difficulty: S.str('normal', ['easy', 'normal', 'hard']), effects: S.bool(true), shake: S.bool(true), showFps: S.bool(false), lang: S.str('ru', ['ru']),
+      };
+      const given = this.o.settings || {};
+      for (const k in given) if (f[k]) f[k] = Object.assign({}, f[k], { def: given[k] });
+      for (const x of this.o.extraSettings || []) {
+        if (x.type === 'range') f[x.name] = S.num(x.default, x.min, x.max);
+        else if (x.type === 'choice') f[x.name] = S.str(x.default, x.options.map((o) => o.value));
+        else f[x.name] = S.bool(x.default);
+      }
+      return S.obj(f);
+    }
+    loadSettings() { return fit(this.load('settings', {}), this.settingsSchema()); }
+    // Загрузка по схеме (см. S выше): испорченное хранилище не роняет игру
+    loadSafe(k, schema) { return fit(this.load(k, undefined), schema); }
 
     // ---------- Хранилище: всё с приставкой игры, чтобы игры в одном приложении не мешали друг другу ----------
     key(k) { return this.id + ':' + k; }
@@ -150,7 +219,7 @@
 
     // ---------- Звук ----------
     audioCtx() {
-      if (!this.ctx) {
+      if (!this.ctx && !this.audioFailed) {
         try {
           const AC = window.AudioContext || window.webkitAudioContext;
           this.ctx = new AC();
@@ -160,9 +229,9 @@
           this.sfxGain = this.ctx.createGain();
           this.musicGain.connect(this.master);
           this.sfxGain.connect(this.master);
-          this.applySettings();
           if (document.hidden) this.ctx.suspend();
-        } catch (e) { this.ctx = null; }
+        } catch (e) { this.ctx = null; this.audioFailed = true; }    // без звука, но один раз, а не на каждый клик
+        if (this.ctx) this.applySettings();
       }
       return this.ctx;
     }
@@ -222,7 +291,7 @@
     // ---------- Ввод: действия вместо клавиш ----------
     defaultBindings() {
       const b = {};
-      for (const a in this.actions) b[a] = (this.actions[a].keys || []).slice(0, 2);
+      for (const a in this.actions) { const k = (this.actions[a].keys || []).slice(0, 2); while (k.length < 2) k.push(null); b[a] = k; }
       return b;
     }
     isDown(action) {
@@ -232,7 +301,11 @@
     wasPressed(action) { return this.pressed.has(action); }
     // Игра вызывает после каждого шага мира: нажатия «съедены»
     endStep() { this.pressed.clear(); }
-    releaseAll() { this.held.clear(); this.pressed.clear(); this.padDown.clear(); }
+    releaseAll() {
+      this.held.clear(); this.pressed.clear(); this.padDown.clear();
+      this.padIgnoreAll = true;                    // зажатые кнопки геймпада не считаются, пока их не отпустят
+      if (this.game.onRelease) this.game.onRelease();
+    }
     actionOf(code) {
       for (const a in this.bindings) if (this.bindings[a].includes(code)) return a;
       return null;
@@ -288,18 +361,23 @@
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
       const pad = Array.from(pads || []).find((p) => p && p.connected);
       this.padDown.clear();
-      if (!pad) { this.padPrev.clear(); return; }
-      const on = (id) => {
+      if (!pad) { this.padPrev.clear(); this.padIgnore = new Set(); return; }
+      const raw = (id) => {
         if (id[0] === 'b') { const b = pad.buttons[Number(id.slice(1))]; return !!(b && b.pressed); }
         const ax = pad.axes[Number(id[1])] || 0;
         return id[2] === '-' ? ax < -0.5 : ax > 0.5;
       };
+      const ALL = ['a0-', 'a0+', 'a1-', 'a1+'].concat(pad.buttons.map((_, i) => 'b' + i));
+      if (this.padIgnoreAll) { this.padIgnore = new Set(ALL.filter(raw)); this.padIgnoreAll = false; }
+      if (!this.padIgnore) this.padIgnore = new Set();
+      for (const id of Array.from(this.padIgnore)) if (!raw(id)) this.padIgnore.delete(id);
+      const on = (id) => raw(id) && !this.padIgnore.has(id);
       if (this.stack.length) {
         const now = new Set(['b12', 'b13', 'a1-', 'a1+', 'b0', 'b1'].filter(on));
         const fresh = (id) => now.has(id) && !this.padPrev.has(id);
         if (fresh('b13') || fresh('a1+')) this.moveFocus(1);
         if (fresh('b12') || fresh('a1-')) this.moveFocus(-1);
-        if (fresh('b0') && document.activeElement && this.layer.contains(document.activeElement)) document.activeElement.click();
+        if (fresh('b0') && document.activeElement && this.layer.contains(document.activeElement)) { this.padIgnoreAll = true; document.activeElement.click(); }
         if (fresh('b1')) this.back();
         this.padPrev = now;
         return;
@@ -332,8 +410,18 @@
     }
     countFrame() { this.frames++; }
 
+    // Отложенное действие (окно итога после анимации). «Заново» и «В меню» его отменяют.
+    later(fn, ms) {
+      if (!this.timers) this.timers = new Set();
+      const id = setTimeout(() => { this.timers.delete(id); fn(); }, ms);
+      this.timers.add(id);
+      return id;
+    }
+    cancelLater() { if (this.timers) { for (const id of this.timers) clearTimeout(id); this.timers.clear(); } }
+
     // ---------- Режимы ----------
     play() {
+      this.cancelLater();
       this.closeAll();
       this.mode = 'play';
       this.releaseAll();
@@ -353,6 +441,7 @@
       if (this.game.onResume) this.game.onResume();
     }
     toMenu() {
+      this.cancelLater();
       this.closeAll();
       this.mode = 'menu';
       this.releaseAll();
@@ -386,6 +475,10 @@
 .kit-body td { padding: 3px 6px; border-bottom: 1px solid var(--kit-line); }
 .kit-buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; align-items: stretch; }
 .kit-buttons.row { flex-direction: row; justify-content: center; flex-wrap: wrap; }
+.kit-buttons.sticky { position: sticky; bottom: -18px; margin: 12px -22px -18px; padding: 10px 22px 14px; background: var(--kit-panel); border-top: 1px solid var(--kit-line); z-index: 2; }
+.kit-cols .kit-row, .kit-cols p { break-inside: avoid; }
+.kit-cols .kit-sec { break-after: avoid; }
+@media (min-width: 980px) { .kit-cols { column-count: 2; column-gap: 36px; } .kit-panel.settings { min-width: min(920px, 94%); max-width: min(1000px, 94%); } }
 .kit-btn { font: inherit; font-size: 16px; font-weight: 600; padding: 9px 18px; border-radius: 10px; border: 2px solid transparent; background: var(--kit-btn); color: var(--kit-fg); cursor: pointer; }
 .kit-btn:hover, .kit-btn:focus { border-color: var(--kit-accent); outline: none; background: var(--kit-btn-hover); }
 .kit-btn.primary { background: var(--kit-accent2); color: #fff; }
@@ -459,9 +552,10 @@
 
     // Показать экран: { title, html | node, buttons: [{label, onClick, primary, cls}], row, wide, logo, back, id }
     show(def) {
+      this.padIgnoreAll = true;
       const scr = this.el('div', 'kit-screen');
       if (def.id) scr.dataset.screen = def.id;
-      const panel = this.el('div', 'kit-panel' + (def.wide ? ' wide' : ''));
+      const panel = this.el('div', 'kit-panel' + (def.wide ? ' wide' : '') + (def.cls ? ' ' + def.cls : ''));
       if (def.logo && this.o.drawLogo) {
         const c = this.el('canvas', 'kit-logo');
         const dpr = window.devicePixelRatio || 1;
@@ -476,7 +570,7 @@
         panel.appendChild(body);
       }
       if (def.buttons && def.buttons.length) {
-        const bs = this.el('div', 'kit-buttons' + (def.row ? ' row' : ''));
+        const bs = this.el('div', 'kit-buttons' + (def.row ? ' row' : '') + (def.sticky ? ' sticky' : ''));
         for (const b of def.buttons) {
           const el = this.btn(b.label, b.onClick, (b.primary ? 'primary ' : '') + (b.cls || ''));
           if (b.id) el.dataset.id = b.id;
@@ -559,14 +653,14 @@
         buttons: [
           { label: 'Продолжить', primary: true, id: 'resume', onClick: () => this.resume() },
           { label: 'Настройки', id: 'settings', onClick: () => this.showSettings() },
-          { label: 'Заново', id: 'restart', onClick: () => { this.closeAll(); if (this.game.onRestart) this.game.onRestart(); } },
+          { label: 'Заново', id: 'restart', onClick: () => { this.cancelLater(); this.closeAll(); if (this.game.onRestart) this.game.onRestart(); } },
           { label: 'В меню', id: 'menu', onClick: () => this.toMenu() },
         ],
       });
     }
 
     showSettings() {
-      const s = this.settings, node = this.el('div');
+      const s = this.settings, node = this.el('div', 'kit-cols');
       const row = (label, control) => { const r = this.el('div', 'kit-row'); r.appendChild(this.el('span', 'lbl', label)); r.appendChild(control); return r; };
       const range = (name) => {
         const i = this.el('input', 'kit-range');
@@ -646,7 +740,7 @@
       const resetP = this.btn('Сбросить прогресс', () => this.confirm('Стереть весь прогресс, рекорды и достижения? Настройки останутся.', () => this.resetProgress()), 'small');
       resetP.dataset.id = 'resetProgress';
       node.appendChild(row('Уровни, рекорды, достижения', resetP));
-      this.show({ id: 'settings', title: 'Настройки', node, wide: true, buttons: [{ label: 'Готово', primary: true, onClick: () => this.pop() }] });
+      this.show({ id: 'settings', title: 'Настройки', node, wide: true, cls: 'settings', sticky: true, buttons: [{ label: 'Готово', primary: true, onClick: () => this.pop() }] });
     }
     startRebind(action, slot) {
       const m = this.el('div', 'kit-modal');
@@ -658,7 +752,13 @@
     finishRebind(code) {
       const r = this.rebinding;
       if (code === 'Escape') { this.cancelRebind(); return; }
-      if (code === 'Backspace') { this.bindings[r.action][r.slot] = null; }
+      if (code === 'Backspace') {
+        if (!this.bindings[r.action][1 - r.slot]) {       // вторая ячейка уже пуста - действие осталось бы без клавиш
+          r.modal.querySelector('.kit-warn').textContent = 'У действия должна остаться хотя бы одна клавиша.';
+          return false;
+        }
+        this.bindings[r.action][r.slot] = null;
+      }
       else {
         const rk = this.o.reservedKeys;
         if (rk && rk.codes.includes(code)) {
@@ -721,5 +821,5 @@
     }
   }
 
-  window.GameKit = { create: (o) => { const k = new Kit(o); window.__kit = k; return k; }, keyName, noteFreq };
+  window.GameKit = { create: (o) => { const k = new Kit(o); window.__kit = k; return k; }, keyName, noteFreq, S, fit };
 })();
