@@ -997,7 +997,7 @@ requestAnimationFrame(loop);
 // ================= Крючок для проверок =================
 window.__game = {
   ready: true, T, TILE, W, H, LEVELS, JUMP_V, GRAV, WALK, RUN, SPRING_V,
-  state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, rocks, get camX() { return camX; },
+  state, player, get kit() { return kit; }, get level() { return level; }, get boss() { return boss; }, rocks, THEMES, HUD_H, VIEW_H, get camX() { return camX; },
   get progress() { return progress; }, get totals() { return totals; }, get autopilot() { return autopilot; },
   step(n = 1, draw = true) { for (let i = 0; i < n; i++) { update(); kit.endStep(); } if (draw) render(); },
   setAutopilot(v) { autopilot = v; }, simulate,

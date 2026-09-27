@@ -421,7 +421,6 @@
 
     // ---------- Режимы ----------
     play() {
-      this.cancelLater();
       this.closeAll();
       this.mode = 'play';
       this.releaseAll();
