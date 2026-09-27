@@ -321,6 +321,7 @@
       // {mix: 'pause'} - как скрытая вкладка (пауза, звук стоит, ввод сброшен); {mix: 'resume'} - звук снова,
       // а пауза остаётся, пока игрок сам не продолжит.
       addEventListener('message', (e) => {
+        if (e.source !== window.parent) return;          // только окно оболочки (у верхнего окна родитель - оно само)
         const m = e.data && e.data.mix;
         if (m === 'pause') this.hideLike();
         else if (m === 'resume' && this.ctx && this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
