@@ -383,11 +383,11 @@
 .kit-body { text-align: left; line-height: 1.5; font-size: 15px; }
 .kit-body p { margin: 6px 0; }
 .kit-body table { border-collapse: collapse; width: 100%; }
-.kit-body td { padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,.08); }
+.kit-body td { padding: 3px 6px; border-bottom: 1px solid var(--kit-line); }
 .kit-buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; align-items: stretch; }
 .kit-buttons.row { flex-direction: row; justify-content: center; flex-wrap: wrap; }
-.kit-btn { font: inherit; font-size: 16px; font-weight: 600; padding: 9px 18px; border-radius: 10px; border: 2px solid transparent; background: rgba(255,255,255,.08); color: var(--kit-fg); cursor: pointer; }
-.kit-btn:hover, .kit-btn:focus { border-color: var(--kit-accent); outline: none; background: rgba(255,255,255,.14); }
+.kit-btn { font: inherit; font-size: 16px; font-weight: 600; padding: 9px 18px; border-radius: 10px; border: 2px solid transparent; background: var(--kit-btn); color: var(--kit-fg); cursor: pointer; }
+.kit-btn:hover, .kit-btn:focus { border-color: var(--kit-accent); outline: none; background: var(--kit-btn-hover); }
 .kit-btn.primary { background: var(--kit-accent2); color: #fff; }
 .kit-btn.small { font-size: 13px; padding: 5px 10px; font-weight: 500; }
 .kit-btn.on { background: var(--kit-accent); color: #111; }
@@ -403,7 +403,9 @@
 .kit-modal { position: absolute; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.6); pointer-events: auto; font-family: var(--kit-font); color: var(--kit-fg); }
 .kit-modal .kit-panel { min-width: 320px; }
 .kit-warn { color: #ff8080; min-height: 20px; margin-top: 8px; }
-.kit-ach { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+.kit-ach { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--kit-line); }
+.kit-val { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; color: var(--kit-fg); }
+.kit-rng { display: flex; align-items: center; gap: 8px; }
 .kit-ach .ic { font-size: 22px; width: 30px; text-align: center; }
 .kit-ach.locked { opacity: .45; }
 .kit-ach b { display: block; }
@@ -416,14 +418,7 @@
         document.head.appendChild(st);
       }
       const root = this.o.root;
-      root.style.setProperty('--kit-bg', th.bg);
-      root.style.setProperty('--kit-fg', th.fg);
-      root.style.setProperty('--kit-accent', th.accent);
-      root.style.setProperty('--kit-accent2', th.accent2);
-      root.style.setProperty('--kit-dim', th.dim);
-      root.style.setProperty('--kit-font', th.font);
-      root.style.setProperty('--kit-panel', th.panel);
-      root.style.setProperty('--kit-shade', th.shade || 'rgba(0,0,0,.35)');
+      this.setTheme(th);
       this.layer = document.createElement('div');
       this.layer.className = 'kit-layer';
       root.appendChild(this.layer);
@@ -433,6 +428,23 @@
       this.fpsEl = document.createElement('div');
       this.fpsEl.className = 'kit-fps';
       root.appendChild(this.fpsEl);
+    }
+
+    // Цвета окон набора; игра может сменить их на лету (например, светлая тема)
+    setTheme(t) {
+      const th = Object.assign({ bg: 'rgba(12,14,28,0.92)', fg: '#f2f2f7', accent: '#ffcc33', accent2: '#ff6b3d', dim: '#9aa0b8', font: '"Segoe UI", Arial, sans-serif', panel: 'rgba(24,28,52,0.96)' }, t || {});
+      const root = this.o.root;
+      root.style.setProperty('--kit-bg', th.bg);
+      root.style.setProperty('--kit-fg', th.fg);
+      root.style.setProperty('--kit-accent', th.accent);
+      root.style.setProperty('--kit-accent2', th.accent2);
+      root.style.setProperty('--kit-dim', th.dim);
+      root.style.setProperty('--kit-font', th.font);
+      root.style.setProperty('--kit-panel', th.panel);
+      root.style.setProperty('--kit-shade', th.shade || 'rgba(0,0,0,.35)');
+      root.style.setProperty('--kit-line', th.line || 'rgba(255,255,255,.08)');
+      root.style.setProperty('--kit-btn', th.btn || 'rgba(255,255,255,.08)');
+      root.style.setProperty('--kit-btn-hover', th.btnHover || 'rgba(255,255,255,.14)');
     }
 
     el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; }
@@ -571,20 +583,46 @@
       node.appendChild(this.el('div', 'kit-sec', 'Звук'));
       node.appendChild(row('Музыка', range('musicVol')));
       node.appendChild(row('Звуки', range('sfxVol')));
+      // Доп. настройки игры: переключатель, ползунок с числом или выбор из вариантов
+      const extra = (x) => {
+        if (x.type === 'range') {
+          const w = this.el('span', 'kit-rng'), v = this.el('span', 'kit-val');
+          const i = this.el('input', 'kit-range');
+          i.type = 'range'; i.min = x.min; i.max = x.max; i.step = x.step || 1; i.value = s[x.name];
+          i.dataset.setting = x.name;
+          const show = () => { v.textContent = x.fmt ? x.fmt(this.settings[x.name]) : this.settings[x.name] + (x.unit || ''); };
+          i.addEventListener('input', () => { this.set(x.name, Number(i.value)); show(); });
+          show(); w.appendChild(i); w.appendChild(v);
+          return w;
+        }
+        if (x.type === 'choice') {
+          const seg = this.el('div', 'kit-seg');
+          for (const opt of x.options) {
+            const b = this.btn(opt.label, () => { this.set(x.name, opt.value); seg.querySelectorAll('button').forEach((y) => y.classList.toggle('on', y.dataset.value === String(this.settings[x.name]))); }, 'small' + (s[x.name] === opt.value ? ' on' : ''));
+            b.dataset.setting = x.name; b.dataset.value = String(opt.value);
+            seg.appendChild(b);
+          }
+          return seg;
+        }
+        return toggle(x.name);
+      };
+      const extras = (sec) => (this.o.extraSettings || []).filter((x) => (x.section || 'Игра') === sec).forEach((x) => node.appendChild(row(x.label, extra(x))));
       node.appendChild(this.el('div', 'kit-sec', 'Игра'));
-      const seg = this.el('div', 'kit-seg');
-      for (const d of ['easy', 'normal', 'hard']) {
-        const b = this.btn(DIFF_NAMES[d], () => { this.set('difficulty', d); seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.diff === this.settings.difficulty)); }, 'small' + (s.difficulty === d ? ' on' : ''));
-        b.dataset.diff = d;
-        seg.appendChild(b);
+      if (!this.o.noDifficulty) {
+        const seg = this.el('div', 'kit-seg');
+        for (const d of ['easy', 'normal', 'hard']) {
+          const b = this.btn(DIFF_NAMES[d], () => { this.set('difficulty', d); seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.diff === this.settings.difficulty)); }, 'small' + (s.difficulty === d ? ' on' : ''));
+          b.dataset.diff = d;
+          seg.appendChild(b);
+        }
+        node.appendChild(row('Сложность', seg));
+        if (this.o.difficultyNote) node.appendChild(this.el('p', 'lbl', `<small style="color:var(--kit-dim)">${this.o.difficultyNote}</small>`));
       }
-      node.appendChild(row('Сложность', seg));
-      if (this.o.difficultyNote) node.appendChild(this.el('p', 'lbl', `<small style="color:var(--kit-dim)">${this.o.difficultyNote}</small>`));
-      for (const x of this.o.extraSettings || []) node.appendChild(row(x.label, toggle(x.name)));
+      extras('Игра');
       node.appendChild(this.el('div', 'kit-sec', 'Графика'));
-      node.appendChild(row('Частицы и вспышки', toggle('effects')));
-      node.appendChild(row('Тряска экрана', toggle('shake')));
-      node.appendChild(row('Показывать кадры в секунду', toggle('showFps')));
+      const GFX = { effects: 'Частицы и вспышки', shake: 'Тряска экрана', showFps: 'Показывать кадры в секунду' };
+      for (const g of this.o.graphics || ['effects', 'shake', 'showFps']) node.appendChild(row(GFX[g], toggle(g)));
+      extras('Графика');
       node.appendChild(row('Язык', this.el('span', '', 'Русский')));
       node.appendChild(this.el('div', 'kit-sec', 'Управление'));
       for (const a in this.actions) {
@@ -599,6 +637,8 @@
         const lbl = this.actions[a].label + (extra ? ` <small style="opacity:.6">(${extra})</small>` : '');
         node.appendChild(row(lbl, slots));
       }
+      extras('Управление');
+      if (this.o.reservedKeys) node.appendChild(row(this.o.reservedKeys.label + ' <small style="opacity:.6">(не меняются)</small>', this.el('span', '', this.o.reservedKeys.text || '')));
       const resetKeys = this.btn('Клавиши по умолчанию', () => { this.bindings = this.defaultBindings(); this.save('bindings', this.bindings); this.pop(); this.showSettings(); }, 'small');
       resetKeys.dataset.id = 'resetKeys';
       node.appendChild(row('', resetKeys));
@@ -620,6 +660,11 @@
       if (code === 'Escape') { this.cancelRebind(); return; }
       if (code === 'Backspace') { this.bindings[r.action][r.slot] = null; }
       else {
+        const rk = this.o.reservedKeys;
+        if (rk && rk.codes.includes(code)) {
+          r.modal.querySelector('.kit-warn').textContent = `Клавиша ${keyName(code)} уже занята: «${rk.label}». Выберите другую.`;
+          return false;
+        }
         const other = Object.keys(this.bindings).find((a) => a !== r.action && this.bindings[a].includes(code));
         if (other) {
           r.modal.querySelector('.kit-warn').textContent = `Клавиша ${keyName(code)} уже занята: «${this.actions[other].label}». Выберите другую.`;
