@@ -317,16 +317,27 @@
       addEventListener('keyup', (e) => { this.held.delete(e.code); });
       addEventListener('blur', () => { this.releaseAll(); if (this.mode === 'play') this.pause(); });
       document.addEventListener('visibilitychange', () => this.onVisibility());
+      // Оболочка «Игротеки» (симулятор ОС) открывает игру во фрейме и сообщает, что окно скрыто или снова видно:
+      // {mix: 'pause'} - как скрытая вкладка (пауза, звук стоит, ввод сброшен); {mix: 'resume'} - звук снова,
+      // а пауза остаётся, пока игрок сам не продолжит.
+      addEventListener('message', (e) => {
+        const m = e.data && e.data.mix;
+        if (m === 'pause') this.hideLike();
+        else if (m === 'resume' && this.ctx && this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+      });
       const unlockAudio = () => { const c = this.audioCtx(); if (c && c.state === 'suspended' && !document.hidden) c.resume(); this.refreshMusic(); };
       addEventListener('pointerdown', unlockAudio, true);
       addEventListener('keydown', unlockAudio, true);
     }
 
+    hideLike() {
+      this.releaseAll();
+      if (this.mode === 'play') this.pause();
+      if (this.ctx) this.ctx.suspend();
+    }
     onVisibility() {
       if (document.hidden) {
-        this.releaseAll();
-        if (this.mode === 'play') this.pause();
-        if (this.ctx) this.ctx.suspend();
+        this.hideLike();
       } else if (this.ctx && this.ctx.state === 'suspended') {
         this.ctx.resume();      // игра остаётся на паузе, пока игрок сам не продолжит
       }
