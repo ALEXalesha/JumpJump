@@ -348,7 +348,7 @@
       if (this.rebinding) { e.preventDefault(); e.stopPropagation(); this.finishRebind(code); return; }
       if (this.stack.length) {        // открыт экран меню: стрелки, Enter, Esc
         const t = e.target;
-        const typing = t && (t.tagName === 'INPUT' && t.type === 'text');
+        const typing = t && ((t.tagName === 'INPUT' && t.type === 'text') || t.tagName === 'TEXTAREA');
         if (typing) return;
         if (code === 'ArrowDown' || code === 'ArrowUp') { e.preventDefault(); this.moveFocus(code === 'ArrowDown' ? 1 : -1); return; }
         if (code === 'Escape') { e.preventDefault(); this.back(); return; }
