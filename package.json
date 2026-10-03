@@ -1,0 +1,19 @@
+{
+  "name": "jumpjump",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jump Jump: a two-world platformer with its own hero, bugs, bees and bosses, in one HTML page (fan-made)",
+  "author": "ALEXalesha",
+  "license": "MIT",
+  "homepage": "https://alexalesha.github.io/JumpJump/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ALEXalesha/JumpJump.git"
+  },
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}
