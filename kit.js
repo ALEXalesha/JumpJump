@@ -311,6 +311,17 @@
       return null;
     }
     keyLabel(action) { return (this.bindings[action] || []).filter(Boolean).map(keyName).join(' / ') || '—'; }
+    // Клавиши действия, назначенные сейчас: «Пробел или ↑»; wrap - обёртка каждого имени
+    keysText(action, wrap = (n) => n) {
+      const k = (this.bindings[action] || []).filter(Boolean).map((c) => wrap(keyName(c)));
+      return k.length > 1 ? k.slice(0, -1).join(', ') + ' или ' + k[k.length - 1] : (k[0] || '—');
+    }
+    // «Как играть»: {keys:действие} - назначенные сейчас клавиши (после переназначения в настройках
+    // текст не называет старые, которые уже ничего не делают)
+    howtoHtml() {
+      const html = (n) => '<b>' + String(n).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</b>';
+      return String(this.o.howto || '').replace(/\{keys:([\w-]+)\}/g, (m, a) => (this.bindings[a] ? this.keysText(a, html) : m));
+    }
 
     bindEvents() {
       addEventListener('keydown', (e) => this.onKeyDown(e), true);
@@ -654,7 +665,7 @@
       const items = (this.game.menuItems ? this.game.menuItems() : []).map((m) => ({ ...m }));
       items.push({ label: 'Настройки', id: 'settings', onClick: () => this.showSettings() });
       items.push({ label: 'Достижения и рекорды', id: 'achievements', onClick: () => this.showAchievements() });
-      items.push({ label: 'Как играть', id: 'howto', onClick: () => this.show({ id: 'howto', title: 'Как играть', html: this.o.howto || '', wide: true, buttons: [{ label: 'Назад', onClick: () => this.pop() }] }) });
+      items.push({ label: 'Как играть', id: 'howto', onClick: () => this.show({ id: 'howto', title: 'Как играть', html: this.howtoHtml(), wide: true, buttons: [{ label: 'Назад', onClick: () => this.pop() }] }) });
       items.push({ label: 'Об игре', id: 'credits', onClick: () => this.show({ id: 'credits', title: 'Об игре', html: this.o.credits || '', wide: true, buttons: [{ label: 'Назад', onClick: () => this.pop() }] }) });
       this.show({ id: 'main', logo: true, buttons: items, back: () => {} });
     }
